@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 from engine import dcf_per_share, gordon, risk_metrics, fcfe_per_share, fcfe_from_components
@@ -6,8 +7,30 @@ from data import get_stock, extract_fcf, extract_fcfe_components
 from advanced import three_stage_fcfe, implied_earnings_growth
 
 st.set_page_config(page_title='StockValue AI',page_icon='📈',layout='wide')
-st.title('📈 StockValue AI')
+logo_path=Path(__file__).with_name('StockValueAI_logo_improved.png')
+if logo_path.exists():
+    st.image(str(logo_path),width=150)
+st.title('StockValue AI')
 st.caption('Educational equity research dashboard | Data: Yahoo Finance via yfinance (unofficial, subject to availability) | Not investment advice')
+
+@st.cache_data(ttl=900,show_spinner=False)
+def load_stock_cached(symbol):
+    """Cache live market/fundamental data for 15 minutes per ticker."""
+    return get_stock(symbol)
+
+@st.cache_data(ttl=900,show_spinner=False)
+def load_peer_table_cached(peer_symbols):
+    """Cache peer-summary requests for 15 minutes."""
+    import yfinance as yf
+    return peer_table(list(peer_symbols),lambda x:yf.Ticker(x).info or {})
+
+def secret_text(name,default=''):
+    """Read a text secret without embedding credentials in source code."""
+    try:
+        value=st.secrets.get(name,default)
+    except Exception:
+        value=default
+    return str(value or '').strip()
 with st.sidebar:
     ticker=st.text_input('Stock ticker','MSFT').strip().upper()
     load=st.button('Analyze stock',type='primary',use_container_width=True)
@@ -21,7 +44,7 @@ with st.sidebar:
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
 if load:
     with st.spinner('Retrieving public market data...'):
-        try: st.session_state['result']=(ticker,get_stock(ticker))
+        try: st.session_state['result']=(ticker,load_stock_cached(ticker))
         except Exception as exc:
             st.error(f'Live data unavailable: {exc}. Please try another ticker or retry later.')
             st.stop()
@@ -53,6 +76,21 @@ price=float(hist['Close'].iloc[-1]); currency=info.get('currency','USD')
 st.subheader(f"{info.get('longName') or ticker} ({ticker})")
 st.caption(f'Latest available adjusted price: {hist.index[-1].date()} | Currency: {currency} | Source: Yahoo Finance (unofficial)')
 if currency!='USD': st.warning('Non-USD listing: all financial statement units and quote currencies must be checked for consistency before interpreting the DCF.')
+
+# Visible data-quality checks prevent missing provider fields from being mistaken for verified zeroes.
+missing_fields=[]
+for label, value in [('Shares outstanding', info.get('sharesOutstanding')), ('Total debt', info.get('totalDebt')), ('Total cash', info.get('totalCash')), ('Revenue', info.get('totalRevenue')), ('Operating cash flow', info.get('operatingCashflow'))]:
+    if value is None or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        missing_fields.append(label)
+with st.expander('Data quality and model warnings', expanded=bool(missing_fields)):
+    st.write('**Quote date:**', hist.index[-1].date())
+    st.write('**History used:**', f'{len(hist):,} daily observations')
+    st.write('**Cash-flow statement columns available:**', f'{len(cashflow.columns) if cashflow is not None and not cashflow.empty else 0}')
+    if missing_fields:
+        st.warning('Unavailable or non-numeric fields: ' + ', '.join(missing_fields) + '. Missing values are not treated as verified zeroes.')
+    else:
+        st.success('Core market and operating fields needed by the dashboard are available.')
+    st.caption('Provider fields can be stale, restated, differently defined, or reported in a different currency. Review the original filing before relying on any estimate.')
 c1,c2,c3,c4=st.columns(4)
 c1.metric('Latest adjusted close',f'{price:,.2f} {currency}')
 c2.metric('Market capitalization',f"{info['marketCap']/1e9:,.2f}B" if isinstance(info.get('marketCap'),(float,int)) else 'N/A')
@@ -88,7 +126,9 @@ with valuation:
                 try: row[f'{r:.1%} WACC']=round(dcf_per_share(fcf_b*1e9,g,r,terminal_growth,years,effective_net_debt,shares_b*1e9)['per_share'],2)
                 except ValueError: row[f'{r:.1%} WACC']=None
             rows.append(row)
-        st.dataframe(pd.DataFrame(rows).set_index('FCF growth'),use_container_width=True)
+        sensitivity_df=pd.DataFrame(rows).set_index('FCF growth')
+        st.dataframe(sensitivity_df,use_container_width=True)
+        st.download_button('Download DCF sensitivity CSV',sensitivity_df.to_csv().encode('utf-8'),file_name=f'{ticker}_dcf_sensitivity.csv',mime='text/csv')
         st.markdown('#### Scenario estimates (illustrative, not calibrated probabilities)')
         scenarios=[]
         for name,dg,dr in [('Bear',-0.03,0.02),('Base',0,0),('Bull',0.03,-0.01)]:
@@ -187,8 +227,23 @@ with valuation:
     div=info.get('dividendRate')
     div=st.number_input('Annual dividend per share',min_value=0.0,value=float(div or 0),format='%.4f')
     dg=st.number_input('Perpetual dividend growth (%)',-20.0,20.0,3.0,0.5)/100
-    try: st.metric('DDM intrinsic value / share',f"{gordon(div,ke,dg):,.2f} {currency}")
-    except ValueError: st.caption('DDM requires a positive dividend and cost of equity above dividend growth.')
+    try:
+        ddm_value=gordon(div,ke,dg)
+        st.metric('DDM intrinsic value / share',f'{ddm_value:,.2f} {currency}')
+    except ValueError:
+        ddm_value=None
+        st.caption('DDM requires a positive dividend and cost of equity above dividend growth.')
+    st.markdown('### Valuation methods at a glance')
+    summary_rows=[]
+    for method, value in [('DCF', locals().get('intrinsic')), ('FCFE', locals().get('fcfe_value')), ('DDM', locals().get('ddm_value'))]:
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            summary_rows.append({'Method':method,'Estimated value / share':float(value),'Current price':price,'Upside / downside':float(value/price-1)})
+    if summary_rows:
+        summary_df=pd.DataFrame(summary_rows)
+        st.dataframe(summary_df.style.format({'Estimated value / share':'{:.2f}','Current price':'{:.2f}','Upside / downside':'{:.1%}'}),hide_index=True,use_container_width=True)
+        st.download_button('Download valuation summary CSV',summary_df.to_csv(index=False).encode('utf-8'),file_name=f'{ticker}_valuation_summary.csv',mime='text/csv')
+        st.caption('These estimates are not directly comparable when they use different cash-flow definitions or discount rates. Review the assumptions and data basis for each method.')
+
 with risk:
     try:
         metrics=risk_metrics(hist['Close'],market['Close'],rf)
@@ -234,13 +289,14 @@ st.divider()
 st.header('SEC filings, earnings growth, analyst estimates & peers | V1.4')
 st.caption('SEC XBRL facts are official reported data. Analyst metrics and peers are retrieved separately from unofficial Yahoo Finance data and may be missing or stale.')
 from sec_research import fetch_companyfacts,historical_table,eps_cagr,analyst_summary,peer_table
-sec_agent=st.text_input('SEC request identity (application name and contact email)',placeholder='Equity Research App contact@example.com',help='SEC requires a declared User-Agent. Your contact email is sent to SEC servers.')
+sec_agent_default=secret_text('SEC_USER_AGENT')
+sec_agent=st.text_input('SEC request identity (application name and contact email)',value=sec_agent_default,placeholder='Equity Research App contact@example.com',help='Set SEC_USER_AGENT in Streamlit Secrets to avoid placing the request identity in source code.')
 sec_tab,analyst_tab,peer_tab=st.tabs(['SEC 10-K history','Analyst comparison','Peer valuation'])
 with sec_tab:
     if st.button('Retrieve official SEC annual financial facts'):
         try:
             with st.spinner('Requesting SEC companyfacts...'):
-                facts=fetch_companyfacts(ticker,sec_agent)
+                facts=fetch_companyfacts(ticker,sec_agent or sec_agent_default)
                 table,tag_sources=historical_table(facts)
             st.session_state['sec_research']=(ticker,table,tag_sources)
         except Exception as exc: st.error(f'SEC request unavailable: {exc}')
@@ -267,7 +323,7 @@ with peer_tab:
         tickers=[x.strip().upper() for x in peers.split(',') if x.strip()][:8]
         import yfinance as yf
         with st.spinner('Loading peer summary data...'):
-            st.session_state['peer_research']=(ticker,peer_table(tickers,lambda x:yf.Ticker(x).info or {}))
+            st.session_state['peer_research']=(ticker,load_peer_table_cached(tuple(tickers)))
     if st.session_state.get('peer_research',('none',))[0]==ticker:
         peers_df=st.session_state['peer_research'][1]
         st.dataframe(peers_df,hide_index=True,use_container_width=True)
@@ -280,3 +336,4 @@ with peer_tab:
                 st.metric('Illustrative peer-implied price (median P/E x trailing EPS)',f'{median_pe*eps:,.2f} {currency}')
                 st.caption('Not an intrinsic value. Multiple differences may reflect growth, leverage, risk, profitability, or accounting differences.')
         st.download_button('Download peer comparison CSV',peers_df.to_csv(index=False).encode(),file_name=f'{ticker}_peers.csv')
+
