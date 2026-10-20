@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 
 
@@ -14,7 +15,8 @@ def get_stock(ticker):
     if market.empty: raise ValueError('Could not load SPY benchmark data.')
     cashflow=obj.cashflow
     balance=obj.balance_sheet
-    return info, history, market, cashflow, balance
+    income=getattr(obj,'income_stmt',pd.DataFrame())
+    return info, history, market, cashflow, balance, income
 
 
 def find_latest(frame, labels):
@@ -51,3 +53,43 @@ def extract_fcfe_components(cashflow):
     else: borrowing=None; source='Net borrowing unavailable: manual entry required'
     return {'cfo':cfo,'capex':abs(capex) if capex is not None else None,
             'net_borrowing':borrowing,'borrowing_source':source}
+
+
+def _cagr_from_series(values, periods):
+    """Return CAGR, years used, latest EPS, start EPS, and endpoint dates."""
+    valid=[]
+    for period,value in zip(periods,values):
+        try:
+            value=float(value)
+            if math.isfinite(value) and value>0:
+                valid.append((pd.Timestamp(period),value))
+        except (TypeError,ValueError):
+            continue
+    valid=sorted(valid,key=lambda x:x[0])
+    if len(valid)<2: return None
+    end_date,end_eps=valid[-1]
+    for years in (10,5,3):
+        target=end_date-pd.DateOffset(years=years)
+        candidates=[item for item in valid if item[0].year==target.year]
+        if candidates:
+            start_date,start_eps=candidates[-1]
+            actual_years=(end_date-start_date).days/365.25
+            if years-0.25<=actual_years<=years+0.25:
+                return (end_eps/start_eps)**(1/years)-1,years,end_eps,start_eps,start_date,end_date
+    return None
+
+
+def estimate_eps_growth(income_stmt=None, sec_table=None):
+    """Estimate recent annual diluted-EPS growth using 10-, 5-, or 3-year data."""
+    if sec_table is not None and not sec_table.empty and 'EPS diluted' in sec_table.columns:
+        result=_cagr_from_series(sec_table['EPS diluted'].tolist(),sec_table['Fiscal year'].tolist())
+        if result:
+            return (*result,'SEC annual diluted EPS')
+    if income_stmt is not None and not income_stmt.empty:
+        for label in ('Diluted EPS','Basic EPS','Diluted EPS Continuing Operations','Basic EPS Continuing Operations'):
+            if label in income_stmt.index:
+                result=_cagr_from_series(income_stmt.loc[label].tolist(),income_stmt.columns.tolist())
+                if result:
+                    return (*result,f'Yahoo Finance annual {label}')
+    return None
+
