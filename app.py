@@ -51,7 +51,13 @@ if load:
 if 'result' not in st.session_state:
     st.info('Enter a stock ticker and click **Analyze stock** to retrieve available live financial data.')
     st.stop()
-ticker,(info,hist,market,cashflow,balance)=st.session_state['result']
+_stored_ticker,_stored_data=st.session_state['result']
+if len(_stored_data)==5:
+    info,hist,market,cashflow,balance=_stored_data
+    income=pd.DataFrame()
+else:
+    info,hist,market,cashflow,balance,income=_stored_data
+ticker=_stored_ticker
 from funds import security_route,etf_analysis
 if security_route(info)=='ETF':
     st.subheader(f"ETF research: {info.get('longName') or ticker} ({ticker})")
