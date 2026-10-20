@@ -16,7 +16,7 @@ def get_stock(ticker):
     cashflow=obj.cashflow
     balance=obj.balance_sheet
     income=getattr(obj,'income_stmt',pd.DataFrame())
-    return info, history, market, cashflow, balance, income
+    return info, history, market, cashflow, balance
 
 
 def find_latest(frame, labels):
