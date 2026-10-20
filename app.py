@@ -336,3 +336,4 @@ with peer_tab:
                 st.metric('Illustrative peer-implied price (median P/E x trailing EPS)',f'{median_pe*eps:,.2f} {currency}')
                 st.caption('Not an intrinsic value. Multiple differences may reflect growth, leverage, risk, profitability, or accounting differences.')
         st.download_button('Download peer comparison CSV',peers_df.to_csv(index=False).encode(),file_name=f'{ticker}_peers.csv')
+
