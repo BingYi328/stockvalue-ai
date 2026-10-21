@@ -1,7 +1,10 @@
-streamlit>=1.35,<2
-pandas>=2.1,<3
-numpy>=1.26,<3
-yfinance>=0.2.50,<2
-pytest>=8,<10
-reportlab>=4.0,<5
-requests>=2.31,<3
+streamlit
+pandas
+numpy
+yfinance
+altair
+requests
+beautifulsoup4
+lxml
+reportlab
+cryptography

@@ -1,0 +1,15 @@
+# Local runtime and Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Subscriber/account data and local secrets — never commit these files
+subscriber_records.json
+*.sqlite3
+.streamlit/secrets.toml
+.env
+
+# Temporary exports and logs
+*.log
+*.tmp
