@@ -420,7 +420,18 @@ with st.sidebar:
     erp=st.number_input('Equity risk premium (%)',0.0,20.0,5.0,0.25)/100
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
 lookup_clicked=bool(sidebar_load or main_load)
-lookup_query=(main_security_query if main_load else security_query).strip()
+# Route each button explicitly. The sidebar action takes precedence if a
+# rerun ever reports both button states, so clicking the green sidebar button
+# cannot accidentally reuse the main-page input.
+if sidebar_load:
+    lookup_query=security_query.strip()
+    lookup_source='sidebar'
+elif main_load:
+    lookup_query=main_security_query.strip()
+    lookup_source='main page'
+else:
+    lookup_query=''
+    lookup_source=''
 if lookup_clicked:
     with st.spinner('Retrieving public market data...'):
         try:
@@ -429,14 +440,18 @@ if lookup_clicked:
             ticker=resolve_ticker_cached(lookup_query)
             st.session_state['result']=(ticker,load_stock_cached(ticker))
             st.session_state['search_query']=lookup_query
-            st.session_state['last_lookup_source']='main page' if main_load else 'sidebar'
+            st.session_state['last_lookup_source']=lookup_source
             st.session_state['last_data_retrieved_at']=datetime.now(timezone.utc).isoformat()
+            st.session_state['lookup_confirmation']=f'{ticker} loaded from the {lookup_source} Analyze button.'
         except Exception as exc:
             st.error(f'Live data unavailable: {exc}. Please try another ticker or retry later.')
             st.stop()
 if 'result' not in st.session_state:
     st.info('Enter a stock ticker and click **Analyze stock** to retrieve available live financial data.')
     st.stop()
+if st.session_state.get('lookup_confirmation'):
+    st.success(st.session_state['lookup_confirmation'])
+    st.session_state.pop('lookup_confirmation',None)
 _stored_ticker,_stored_data=st.session_state['result']
 if len(_stored_data)==5:  # compatibility with an already-running pre-growth session
     info,hist,market,cashflow,balance=_stored_data
