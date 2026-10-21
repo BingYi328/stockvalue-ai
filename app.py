@@ -383,8 +383,8 @@ with st.sidebar:
         st.caption('Subscriber records are written in encrypted form to the configured store.')
     else:
         st.warning('Encrypted subscriber storage is not configured. Records remain session-only and are not written to disk.')
-    security_query=st.text_input('Company name or ticker','MSFT').strip()
-    load=st.button('Analyze stock',type='primary',use_container_width=True)
+    security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
+    sidebar_load=st.button('Analyze stock',type='primary',use_container_width=True,key='sidebar_analyze_button')
     st.markdown('**Model settings**')
     growth=st.number_input('Annual FCF growth (%)',-90.0,100.0,7.0,0.5)/100
     discount=st.number_input('Discount rate / WACC (%)',0.1,60.0,10.0,0.5)/100
@@ -393,16 +393,17 @@ with st.sidebar:
     rf=st.number_input('Risk-free rate (%)',0.0,25.0,4.0,0.25)/100
     erp=st.number_input('Equity risk premium (%)',0.0,20.0,5.0,0.25)/100
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
-if main_load:
-    # Use the main-page control when the sidebar is collapsed.
-    security_query=main_security_query.strip()
-    load=True
-if load:
+lookup_clicked=bool(sidebar_load or main_load)
+lookup_query=(main_security_query if main_load else security_query).strip()
+if lookup_clicked:
     with st.spinner('Retrieving public market data...'):
         try:
-            ticker=resolve_ticker_cached(security_query)
+            if not lookup_query:
+                raise ValueError('Enter a company name or ticker symbol.')
+            ticker=resolve_ticker_cached(lookup_query)
             st.session_state['result']=(ticker,load_stock_cached(ticker))
-            st.session_state['search_query']=security_query
+            st.session_state['search_query']=lookup_query
+            st.session_state['last_lookup_source']='main page' if main_load else 'sidebar'
         except Exception as exc:
             st.error(f'Live data unavailable: {exc}. Please try another ticker or retry later.')
             st.stop()
