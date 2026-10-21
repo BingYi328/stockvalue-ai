@@ -259,6 +259,10 @@ def _save_subscriber_records():
         # Do not expose secret/configuration details in the public UI.
         st.session_state['subscriber_store_error']='Subscriber records could not be saved securely. Check the encrypted storage configuration; no plaintext copy was written.'
 
+def _queue_sidebar_lookup():
+    """Preserve a sidebar Analyze click before Streamlit reruns the script."""
+    st.session_state['sidebar_lookup_requested']=True
+
 def _account():
     username=st.session_state.get('current_user')
     return st.session_state['sim_accounts'].get(username) if username else None
@@ -413,7 +417,7 @@ with st.sidebar:
     # cannot be lost during Streamlit's rerun.
     with st.form('sidebar_lookup_form',clear_on_submit=False):
         security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
-        sidebar_load=st.form_submit_button('Analyze stock',type='primary',use_container_width=True)
+        sidebar_load=st.form_submit_button('Analyze stock',type='primary',use_container_width=True,on_click=_queue_sidebar_lookup)
     st.markdown('**Model settings**')
     growth=st.number_input('Annual FCF growth (%)',-90.0,100.0,7.0,0.5)/100
     discount=st.number_input('Discount rate / WACC (%)',0.1,60.0,10.0,0.5)/100
@@ -422,11 +426,12 @@ with st.sidebar:
     rf=st.number_input('Risk-free rate (%)',0.0,25.0,4.0,0.25)/100
     erp=st.number_input('Equity risk premium (%)',0.0,20.0,5.0,0.25)/100
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
-lookup_clicked=bool(sidebar_load or main_load)
+sidebar_request=bool(st.session_state.pop('sidebar_lookup_requested',False))
+lookup_clicked=bool(sidebar_load or sidebar_request or main_load)
 # Route each button explicitly. The sidebar action takes precedence if a
 # rerun ever reports both button states, so clicking the green sidebar button
 # cannot accidentally reuse the main-page input.
-if sidebar_load:
+if sidebar_load or sidebar_request:
     lookup_query=security_query.strip()
     lookup_source='sidebar'
 elif main_load:
@@ -758,7 +763,7 @@ with news_technical:
     else:
         st.info('No earnings or corporate-event dates were returned by the public data provider.')
     st.markdown('### Insider and institutional activity')
-    st.caption('The tables below separate reported insider records from institutional holding disclosures. A reported institutional holding is not proof of a purchase or sale, and an implied value/share is not necessarily the actual transaction price.')
+    st.caption('The tables below separate reported insider records from institutional holding disclosures and include the reported insider title or institutional holder name when the provider supplies it. A reported institutional holding is not proof of a purchase or sale, and an implied value/share is not necessarily the actual transaction price.')
     if not insider_df.empty:
         st.markdown('#### Insider transactions')
         st.dataframe(insider_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
@@ -1135,4 +1140,3 @@ with peer_tab:
                 st.metric('Illustrative peer-implied price (median P/E x trailing EPS)',f'{median_pe*eps:,.2f} {currency}')
                 st.caption('Not an intrinsic value. Multiple differences may reflect growth, leverage, risk, profitability, or accounting differences.')
         st.download_button('Download peer comparison CSV',peers_df.to_csv(index=False).encode(),file_name=f'{ticker}_peers.csv')
-
