@@ -33,6 +33,15 @@ st.markdown('''
     [data-testid="stSidebar"] [data-baseweb="select"] div { color:#172334 !important; }
     [data-testid="stSidebar"] button { border:1px solid rgba(255,255,255,.22); border-radius:8px; }
     [data-testid="stSidebar"] button[kind="primary"] { background:#19a974; border-color:#19a974; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] { background:#ffffff !important; border:2px solid #7cc7e8 !important; border-radius:10px !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] { color:#10243e !important; background:#ffffff !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] * { color:#10243e !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] h3 { color:#0b4f71 !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary * { color:#0b4f71 !important; font-weight:800 !important; }
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label { color:#ffffff !important; font-weight:750 !important; }
     h1,h2,h3 { color:var(--navy); letter-spacing:-.02em; }
     h1 { font-size:2.35rem !important; margin-bottom:.1rem !important; }
     h2 { margin-top:1.35rem !important; }
@@ -779,3 +788,4 @@ with peer_tab:
                 st.metric('Illustrative peer-implied price (median P/E x trailing EPS)',f'{median_pe*eps:,.2f} {currency}')
                 st.caption('Not an intrinsic value. Multiple differences may reflect growth, leverage, risk, profitability, or accounting differences.')
         st.download_button('Download peer comparison CSV',peers_df.to_csv(index=False).encode(),file_name=f'{ticker}_peers.csv')
+
