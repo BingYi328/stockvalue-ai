@@ -1,5 +1,6 @@
 import math
 import hashlib
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
@@ -8,7 +9,19 @@ from engine import dcf_per_share, gordon, risk_metrics, fcfe_per_share, fcfe_fro
 from data import get_stock, extract_fcf, extract_fcfe_components, estimate_eps_growth, resolve_ticker, get_news_and_dates, technical_indicators
 from advanced import three_stage_fcfe, implied_earnings_growth
 
-st.set_page_config(page_title='StockValue AI',page_icon='ðŸ“ˆ',layout='wide')
+st.set_page_config(page_title='StockValue AI',page_icon='📈',layout='wide',initial_sidebar_state='expanded')
+
+# Prototype-wide visitor counter. Each Streamlit session is counted once.
+# It resets when the app process is restarted because no external database is used.
+if '_visitor_count' not in globals():
+    _visitor_count=0
+if '_visitor_count_lock' not in globals():
+    _visitor_count_lock=threading.Lock()
+if 'visitor_registered' not in st.session_state:
+    with _visitor_count_lock:
+        _visitor_count+=1
+        st.session_state['visitor_registered']=True
+        st.session_state['visitor_number']=_visitor_count
 st.markdown('''
 <style>
     :root { --navy:#10243e; --blue:#1f5f8b; --teal:#159957; --ink:#172334; --muted:#667085; --line:#d9e2ec; --soft:#f4f7fa; }
@@ -27,6 +40,17 @@ st.markdown('''
     [data-testid="stMetric"] { background:#ffffff; border:1px solid var(--line); border-radius:12px; padding:14px 16px; box-shadow:0 4px 14px rgba(16,36,62,.06); }
     [data-testid="stMetricLabel"] { color:var(--muted) !important; font-size:.78rem !important; text-transform:uppercase; letter-spacing:.06em; }
     [data-testid="stMetricValue"] { color:var(--navy) !important; font-weight:750; }
+    [data-testid="stSidebar"] [data-testid="stMetric"] { background:rgba(255,255,255,.16) !important; border:1px solid rgba(255,255,255,.42) !important; box-shadow:0 4px 14px rgba(0,0,0,.18); }
+    [data-testid="stSidebar"] [data-testid="stMetricLabel"] { color:#e8f7ff !important; font-weight:800 !important; }
+    [data-testid="stSidebar"] [data-testid="stMetricValue"] { color:#ffffff !important; font-size:1.45rem !important; font-weight:850 !important; }
+    .portfolio-balance-card { background:linear-gradient(120deg,#0b6b4f 0%,#159957 55%,#21b878 100%); color:#ffffff; border:2px solid #b8ffe0; border-radius:14px; padding:18px 22px; margin:12px 0 18px 0; box-shadow:0 8px 22px rgba(13,105,76,.24); }
+    .portfolio-balance-card .label { color:#eafff5; font-size:.82rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .portfolio-balance-card .amount { color:#ffffff; font-size:2rem; font-weight:900; line-height:1.15; margin-top:4px; }
+    .portfolio-balance-card .detail { color:#eafff5; font-size:.88rem; margin-top:5px; }
+    .visitor-counter-card { background:linear-gradient(120deg,#10243e 0%,#1f5f8b 100%); color:#ffffff; border:1px solid #7cc7e8; border-radius:14px; padding:15px 20px; margin:10px 0 20px 0; box-shadow:0 6px 18px rgba(16,36,62,.16); }
+    .visitor-counter-card .welcome { color:#dff5ff; font-size:1rem; font-weight:650; }
+    .visitor-counter-card .count { color:#ffffff; font-size:1.7rem; font-weight:900; margin-top:3px; }
+    .visitor-counter-card .note { color:#d9ebf5; font-size:.78rem; margin-top:4px; }
     [data-testid="stTabs"] button { color:var(--muted); font-weight:650; }
     [data-testid="stTabs"] button[aria-selected="true"] { color:var(--blue); border-bottom-color:var(--teal); }
     [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
@@ -43,8 +67,18 @@ st.markdown('''
 logo_path=Path(__file__).with_name('StockValueAI_logo_improved.png')
 if logo_path.exists():
     st.image(str(logo_path),width=150)
-st.markdown('''<div class="research-hero"><h1>StockValue AI</h1><p>Professional equity research dashboard for valuation, market context, and technical signals.</p><span class="hero-badge">Research prototype Â· FCFE first Â· Educational use</span></div>''',unsafe_allow_html=True)
-st.caption('Public data via Yahoo Finance/yfinance is unofficial and may be delayed or incomplete. This dashboard is for educational researchâ€”not investment advice.')
+st.markdown('''<div class="research-hero"><h1>StockValue AI</h1><p>Professional equity research dashboard for valuation, market context, and technical signals.</p><span class="hero-badge">Research prototype · FCFE first · Educational use</span></div>''',unsafe_allow_html=True)
+st.markdown(f'''<div class="visitor-counter-card"><div class="welcome">Welcome to StockValue AI!</div><div class="count">You are visitor #{st.session_state['visitor_number']:,}</div><div class="note">Total visitor sessions since the last app restart: {_visitor_count:,}.</div></div>''',unsafe_allow_html=True)
+st.caption('Public data via Yahoo Finance/yfinance is unofficial and may be delayed or incomplete. This dashboard is for educational research—not investment advice.')
+
+# Main-page lookup remains available even when the sidebar is collapsed.
+with st.container():
+    st.markdown('### Quick ticker lookup')
+    _main_query_col,_main_button_col=st.columns([4,1])
+    with _main_query_col:
+        main_security_query=st.text_input('Company name or ticker',value='MSFT',key='main_security_query',label_visibility='collapsed',placeholder='Enter a company name or ticker')
+    with _main_button_col:
+        main_load=st.button('Analyze',type='primary',use_container_width=True,key='main_analyze_button')
 
 @st.cache_data(ttl=900,show_spinner=False)
 def load_stock_cached(symbol):
@@ -74,6 +108,29 @@ def secret_text(name,default=''):
     return str(value or '').strip()
 
 STARTING_VIRTUAL_CASH=100000.0
+TERMS_VERSION='2026-10-20'
+FORUM_EXTREME_TERMS={
+    'guaranteed winner','guaranteed win','cannot lose','can’t lose','no risk',
+    'certainly double','will double','to the moon','all in','sell everything',
+    'zero chance of loss','100% guaranteed','sure thing','bankrupt tomorrow',
+    'going to zero','definitely crash','guaranteed crash'
+}
+
+TERMS_AND_AGREEMENT='''
+### StockValue AI subscriber terms and agreement
+
+By creating an account, you acknowledge and agree that:
+
+1. **Educational information only.** StockValue AI provides educational research tools, estimates, charts, market data, and discussion features. The information is not investment, financial, legal, tax, or accounting advice.
+2. **Do not rely on one output.** Estimated values, technical signals, news, and user posts may be incomplete, delayed, inaccurate, or based on assumptions. You will not use any estimate or post as your sole support for buying, selling, or holding a stock or ETF. You will independently investigate and consider your objectives, risk tolerance, diversification, current filings, and qualified professional advice.
+3. **No guarantee.** StockValue AI does not guarantee the accuracy, completeness, timeliness, or profitability of any data, estimate, signal, or user contribution. Past performance does not predict future results.
+4. **Paper trading only.** Any account balance and trading activity in this prototype are simulated. No real money, brokerage account, or payment processing is involved.
+5. **Forum conduct.** You may share ideas and information respectfully, but you may not post market manipulation, fraud, personal information, spam, unlawful content, or extremely bullish or extremely bearish claims such as guaranteed profits, guaranteed losses, or instructions to go all-in. The owner may remove posts or suspend access.
+6. **User responsibility and limitation of responsibility.** You are responsible for your decisions and use of the app. To the maximum extent permitted by applicable law, the owner and developer are not responsible for losses, damages, missed opportunities, or other consequences arising from reliance on the app, its estimates, its data, or forum content. This provision does not eliminate rights or responsibilities that cannot legally be excluded.
+7. **Prototype storage.** Accounts, balances, posts, and watchlists may be stored only in the active Streamlit session and may be lost when the app restarts. Do not submit passwords, account numbers, Social Security numbers, or other confidential information.
+
+This prototype is not a brokerage, investment adviser, research service, or recommendation service. By checking the agreement box, you confirm that you have read and accepted these terms.
+'''
 
 def _password_hash(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -83,13 +140,17 @@ def _init_accounts():
         st.session_state['sim_accounts']={}
     if 'current_user' not in st.session_state:
         st.session_state['current_user']=None
+    if 'forum_posts' not in st.session_state:
+        st.session_state['forum_posts']=[]
 
 def _account():
     username=st.session_state.get('current_user')
     return st.session_state['sim_accounts'].get(username) if username else None
 
-def _create_account(username,password):
+def _create_account(username,password,terms_accepted=False):
     username=username.strip().lower()
+    if not terms_accepted:
+        return False,'You must read and accept the StockValue AI subscriber terms before creating an account.'
     if len(username)<3 or len(password)<6:
         return False,'Use a username with at least 3 characters and a password with at least 6 characters.'
     if username in st.session_state['sim_accounts']:
@@ -100,10 +161,30 @@ def _create_account(username,password):
         'holdings':{},
         'watchlist':{},
         'transactions':[],
+        'terms_version':TERMS_VERSION,
+        'terms_accepted_at':datetime.now(timezone.utc).isoformat(),
         'created_at':datetime.now(timezone.utc).isoformat()
     }
     st.session_state['current_user']=username
     return True,'Account created with $100,000 virtual cash.'
+
+def _validate_forum_post(title,body):
+    text=f'{title} {body}'.strip().lower()
+    if len(title.strip())<5:
+        return False,'Please provide a descriptive title of at least five characters.'
+    if len(body.strip())<20:
+        return False,'Please provide at least 20 characters so other subscribers can understand your thought.'
+    if len(title)>120 or len(body)>3000:
+        return False,'Please keep the title under 120 characters and the post under 3,000 characters.'
+    matched=[term for term in FORUM_EXTREME_TERMS if term in text]
+    if matched:
+        return False,'This post uses an extreme or guaranteed bullish/bearish claim. Please rewrite it as balanced, evidence-based analysis.'
+    exclamations=text.count('!')
+    uppercase_letters=sum(1 for char in f'{title} {body}' if char.isalpha() and char.isupper())
+    letters=sum(1 for char in f'{title} {body}' if char.isalpha())
+    if exclamations>=4 or (letters>=30 and uppercase_letters/max(letters,1)>.65):
+        return False,'Please avoid extremely promotional or alarmist formatting. Use measured language and explain the evidence.'
+    return True,''
 
 def _login(username,password):
     username=username.strip().lower()
@@ -133,8 +214,11 @@ with st.sidebar:
         _account_name=st.text_input('Username',key='account_name')
         _account_password=st.text_input('Password',type='password',key='account_password')
         if _account_mode=='Create account':
+            with st.expander('Read subscriber terms and agreement',expanded=False):
+                st.markdown(TERMS_AND_AGREEMENT)
+            _terms_accepted=st.checkbox('I have read and agree to the subscriber terms and agreement.',key='terms_accepted')
             if st.button('Subscribe free / create account',use_container_width=True):
-                _ok,_message=_create_account(_account_name,_account_password)
+                _ok,_message=_create_account(_account_name,_account_password,_terms_accepted)
                 (st.success if _ok else st.error)(_message)
                 if _ok: st.rerun()
         else:
@@ -151,6 +235,10 @@ with st.sidebar:
     rf=st.number_input('Risk-free rate (%)',0.0,25.0,4.0,0.25)/100
     erp=st.number_input('Equity risk premium (%)',0.0,20.0,5.0,0.25)/100
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
+if main_load:
+    # Use the main-page control when the sidebar is collapsed.
+    security_query=main_security_query.strip()
+    load=True
 if load:
     with st.spinner('Retrieving public market data...'):
         try:
@@ -232,10 +320,10 @@ c1.metric('Latest adjusted close',f'{price:,.2f} {currency}')
 c2.metric('Market capitalization',f"{info['marketCap']/1e9:,.2f}B" if isinstance(info.get('marketCap'),(float,int)) else 'N/A')
 c3.metric('Trailing P/E',f"{info['trailingPE']:.1f}" if isinstance(info.get('trailingPE'),(int,float)) else 'N/A')
 c4.metric('Dividend yield',f"{info['dividendYield']*100:.2f}%" if isinstance(info.get('dividendYield'),(float,int)) else 'N/A')
-st.markdown('<div class="source-note">Market snapshot Â· Latest available quote and company summary fields</div>',unsafe_allow_html=True)
+st.markdown('<div class="source-note">Market snapshot · Latest available quote and company summary fields</div>',unsafe_allow_html=True)
 news_df,dates_df=load_news_dates_cached(ticker)
 technical_df,technical_signals=technical_indicators(hist)
-valuation,news_technical,risk,fundamentals,portfolio,notes=st.tabs(['Intrinsic valuation','News & technical analysis','Risk & return','Financial fundamentals','Paper portfolio','Methods & caveats'])
+valuation,news_technical,risk,fundamentals,portfolio,forum,notes=st.tabs(['Intrinsic valuation','News & technical analysis','Risk & return','Financial fundamentals','Paper portfolio','Subscriber forum','Methods & caveats'])
 with valuation:
     fcf,fcf_source=extract_fcf(info,cashflow)
     shares=info.get('sharesOutstanding')
@@ -295,7 +383,7 @@ with valuation:
         a.metric('Secondary DCF / FCFF value / share',f'{intrinsic:,.2f} {currency}')
         b.metric('Upside / downside vs price',f'{(intrinsic/price-1)*100:+.1f}%')
         c.metric('Margin of safety',f'{(1-price/intrinsic)*100:.1f}%' if intrinsic>0 else 'N/A')
-        st.caption(f"Terminal value share of enterprise value: {dcf['terminal_fraction']:.1%} â€” high values indicate sensitivity to terminal assumptions.")
+        st.caption(f"Terminal value share of enterprise value: {dcf['terminal_fraction']:.1%} — high values indicate sensitivity to terminal assumptions.")
         st.markdown('#### Discount-rate / growth sensitivity')
         rows=[]
         for g in [growth-0.02,growth,growth+0.02]:
@@ -316,7 +404,7 @@ with valuation:
         st.dataframe(pd.DataFrame(scenarios),hide_index=True,use_container_width=True)
     except ValueError as exc: st.info(f'DCF unavailable: {exc}')
     st.markdown('### Third: intrinsic value from the constant-growth EPS model')
-    st.caption('The estimated recent EPS growth rate is used as the future annual growth rate. The model is Vâ‚€ = EPSâ‚ / (cost of equity âˆ’ growth), where EPSâ‚ = latest EPS Ã— (1 + growth).')
+    st.caption('The estimated recent EPS growth rate is used as the future annual growth rate. The model is V₀ = EPS₁ / (cost of equity − growth), where EPS₁ = latest EPS × (1 + growth).')
     if eps_growth_data and constant_growth_value is not None:
         g1,g2,g3=st.columns(3)
         g1.metric('Constant-growth intrinsic value / share',f'{constant_growth_value:,.2f} {currency}')
@@ -328,7 +416,7 @@ with valuation:
     else:
         st.warning('A 10-, 5-, or 3-year positive diluted-EPS history was not available. The constant-growth EPS valuation cannot be calculated without valid positive endpoint EPS observations.')
     st.markdown('### Detailed FCFE assumptions and sensitivity analysis')
-    st.caption('FCFE = cash flow from operations âˆ’ capital expenditures + net borrowing. Financial statement labels and signs must be verified. All values below are in billions of reporting currency.')
+    st.caption('FCFE = cash flow from operations − capital expenditures + net borrowing. Financial statement labels and signs must be verified. All values below are in billions of reporting currency.')
     parts=extract_fcfe_components(cashflow)
     cfo_b=st.number_input('Annual operating cash flow (billions)',value=float(parts['cfo'] or 0)/1e9,format='%.4f',key='fcfe_cfo')
     capex_b=st.number_input('Annual capital expenditures, positive outflow (billions)',min_value=0.0,value=float(parts['capex'] or 0)/1e9,format='%.4f',key='fcfe_capex')
@@ -520,6 +608,7 @@ with portfolio:
         p1.metric('Virtual cash',f"${active_account['cash']:,.2f}")
         p2.metric('Holdings value',f"${total_holdings_value:,.2f}")
         p3.metric('Paper account value',f"${active_account['cash']+total_holdings_value:,.2f}")
+        st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Paper portfolio balance</div><div class="amount">${active_account['cash']+total_holdings_value:,.2f}</div><div class="detail">Virtual cash: ${active_account['cash']:,.2f} · Holdings: ${total_holdings_value:,.2f}</div></div>''',unsafe_allow_html=True)
         if valuation_rows:
             st.dataframe(pd.DataFrame(valuation_rows),hide_index=True,use_container_width=True)
         else:
@@ -576,6 +665,48 @@ with portfolio:
                 st.warning(f"{ticker} is at or below your warning price of ${current_watch['Warning below']:,.2f}.")
         else:
             st.info('Your watchlist will populate automatically when you analyze a stock or ETF.')
+
+with forum:
+    st.markdown('### Subscriber stock and ETF forum')
+    st.caption('Share research observations, questions, news, and balanced risk discussions. Forum posts are educational opinions—not recommendations.')
+    st.info('Extremely bullish or bearish claims, guaranteed outcomes, alarmist language, market manipulation, spam, and confidential personal information are prohibited.')
+    if active_account is None:
+        st.warning('Create an account and accept the subscriber terms to participate in the forum.')
+    else:
+        with st.form('forum_post_form',clear_on_submit=True):
+            forum_ticker=st.text_input('Stock or ETF ticker',value=ticker,max_chars=16).strip().upper()
+            forum_title=st.text_input('Post title',max_chars=120,placeholder='Example: What risks should investors monitor?')
+            forum_type=st.selectbox('Discussion type',['Balanced analysis','Question','News or filing discussion','Risk discussion'])
+            forum_body=st.text_area('Your information or thoughts',max_chars=3000,height=150,placeholder='Describe the evidence, assumptions, uncertainty, and possible risks. Avoid guaranteed or extreme claims.')
+            forum_submit=st.form_submit_button('Publish post',type='primary')
+        if forum_submit:
+            _valid,_forum_message=_validate_forum_post(forum_title,forum_body)
+            if not forum_ticker or not all(char.isalnum() or char in '.-^' for char in forum_ticker):
+                _valid=False
+                _forum_message='Enter a valid stock or ETF ticker.'
+            if _valid:
+                st.session_state['forum_posts'].append({
+                    'ticker':forum_ticker,
+                    'title':forum_title.strip(),
+                    'type':forum_type,
+                    'body':forum_body.strip(),
+                    'author':st.session_state['current_user'],
+                    'created_at':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                })
+                st.success('Your balanced discussion post was published.')
+            else:
+                st.error(_forum_message)
+    st.markdown('#### Recent community posts')
+    if not st.session_state['forum_posts']:
+        st.info('No posts yet. Be the first subscriber to start a balanced discussion.')
+    else:
+        for _post in reversed(st.session_state['forum_posts'][-50:]):
+            with st.container(border=True):
+                st.markdown(f"**{_post['title']}** · `{_post['ticker']}`")
+                st.caption(f"{_post['type']} · Posted by {_post['author']} · {_post['created_at']}")
+                st.write(_post['body'])
+    st.caption('Forum moderation is an automated prototype filter and cannot detect every problematic post. Report or avoid relying on any user contribution as financial advice.')
+
 with notes:
     st.markdown('''**Data provenance:** yfinance retrieves public Yahoo Finance data using an unofficial interface; reliability, redistribution rights, availability and update timing are not guaranteed. The app does not use a paid API key.\n\n**FCFE model:** FCFE = CFO - capex + net borrowing; use the cost of equity and do not subtract debt again. The net-borrowing field must be verified against the statement of cash flows. The DDM also uses the cost of equity.\n\n**DCF limitation:** This is an educational screening calculation. A robust enterprise DCF requires forecast *unlevered* free cash flow (FCFF), a consistent WACC, and net-debt reconciliation. For a levered free-cash-flow-to-equity (FCFE) model, discount at cost of equity and do **not** subtract net debt.\n\n**Risk:** Beta, Sharpe ratio and volatility are historical estimates. CAPM expected return depends on assumed risk-free rate and equity premium. Price-only historical returns are not total returns.\n\n**Decision support:** No automatic buy/sell recommendation is generated. Verify financial statements, dilution, one-time items, currency, debt, industry cyclicality and assumptions before investing. No price feed or estimate is guaranteed real-time.''')
 
