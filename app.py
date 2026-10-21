@@ -1,14 +1,35 @@
 import math
 import hashlib
+import json
+import os
+import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ImportError:
+    Fernet=None
+    InvalidToken=Exception
 from engine import dcf_per_share, gordon, risk_metrics, fcfe_per_share, fcfe_from_components
-from data import get_stock, extract_fcf, extract_fcfe_components, estimate_eps_growth, resolve_ticker, get_news_and_dates, technical_indicators
+from data import get_stock, get_intraday_history, extract_fcf, extract_fcfe_components, estimate_eps_growth, resolve_ticker, get_news_and_dates, get_transaction_activity, technical_indicators
 from advanced import three_stage_fcfe, implied_earnings_growth
 
-st.set_page_config(page_title='StockValue AI',page_icon='📈',layout='wide')
+st.set_page_config(page_title='StockValue AI',page_icon='📈',layout='wide',initial_sidebar_state='expanded')
+
+# Prototype-wide visitor counter. Each Streamlit session is counted once.
+# It resets when the app process is restarted because no external database is used.
+if '_visitor_count' not in globals():
+    _visitor_count=0
+if '_visitor_count_lock' not in globals():
+    _visitor_count_lock=threading.Lock()
+if 'visitor_registered' not in st.session_state:
+    with _visitor_count_lock:
+        _visitor_count+=1
+        st.session_state['visitor_registered']=True
+        st.session_state['visitor_number']=_visitor_count
 st.markdown('''
 <style>
     :root { --navy:#10243e; --blue:#1f5f8b; --teal:#159957; --ink:#172334; --muted:#667085; --line:#d9e2ec; --soft:#f4f7fa; }
@@ -20,6 +41,15 @@ st.markdown('''
     [data-testid="stSidebar"] [data-baseweb="select"] div { color:#172334 !important; }
     [data-testid="stSidebar"] button { border:1px solid rgba(255,255,255,.22); border-radius:8px; }
     [data-testid="stSidebar"] button[kind="primary"] { background:#19a974; border-color:#19a974; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] { background:#ffffff !important; border:2px solid #7cc7e8 !important; border-radius:10px !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] { color:#10243e !important; background:#ffffff !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] * { color:#10243e !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stMarkdownContainer"] h3 { color:#0b4f71 !important; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary * { color:#0b4f71 !important; font-weight:800 !important; }
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label { color:#ffffff !important; font-weight:750 !important; }
     h1,h2,h3 { color:var(--navy); letter-spacing:-.02em; }
     h1 { font-size:2.35rem !important; margin-bottom:.1rem !important; }
     h2 { margin-top:1.35rem !important; }
@@ -27,6 +57,17 @@ st.markdown('''
     [data-testid="stMetric"] { background:#ffffff; border:1px solid var(--line); border-radius:12px; padding:14px 16px; box-shadow:0 4px 14px rgba(16,36,62,.06); }
     [data-testid="stMetricLabel"] { color:var(--muted) !important; font-size:.78rem !important; text-transform:uppercase; letter-spacing:.06em; }
     [data-testid="stMetricValue"] { color:var(--navy) !important; font-weight:750; }
+    [data-testid="stSidebar"] [data-testid="stMetric"] { background:rgba(255,255,255,.16) !important; border:1px solid rgba(255,255,255,.42) !important; box-shadow:0 4px 14px rgba(0,0,0,.18); }
+    [data-testid="stSidebar"] [data-testid="stMetricLabel"] { color:#e8f7ff !important; font-weight:800 !important; }
+    [data-testid="stSidebar"] [data-testid="stMetricValue"] { color:#ffffff !important; font-size:1.45rem !important; font-weight:850 !important; }
+    .portfolio-balance-card { background:linear-gradient(120deg,#0b6b4f 0%,#159957 55%,#21b878 100%); color:#ffffff; border:2px solid #b8ffe0; border-radius:14px; padding:18px 22px; margin:12px 0 18px 0; box-shadow:0 8px 22px rgba(13,105,76,.24); }
+    .portfolio-balance-card .label { color:#eafff5; font-size:.82rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .portfolio-balance-card .amount { color:#ffffff; font-size:2rem; font-weight:900; line-height:1.15; margin-top:4px; }
+    .portfolio-balance-card .detail { color:#eafff5; font-size:.88rem; margin-top:5px; }
+    .visitor-counter-card { background:linear-gradient(120deg,#10243e 0%,#1f5f8b 100%); color:#ffffff; border:1px solid #7cc7e8; border-radius:14px; padding:15px 20px; margin:10px 0 20px 0; box-shadow:0 6px 18px rgba(16,36,62,.16); }
+    .visitor-counter-card .welcome { color:#dff5ff; font-size:1rem; font-weight:650; }
+    .visitor-counter-card .count { color:#ffffff; font-size:1.7rem; font-weight:900; margin-top:3px; }
+    .visitor-counter-card .note { color:#d9ebf5; font-size:.78rem; margin-top:4px; }
     [data-testid="stTabs"] button { color:var(--muted); font-weight:650; }
     [data-testid="stTabs"] button[aria-selected="true"] { color:var(--blue); border-bottom-color:var(--teal); }
     [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
@@ -44,7 +85,18 @@ logo_path=Path(__file__).with_name('StockValueAI_logo_improved.png')
 if logo_path.exists():
     st.image(str(logo_path),width=150)
 st.markdown('''<div class="research-hero"><h1>StockValue AI</h1><p>Professional equity research dashboard for valuation, market context, and technical signals.</p><span class="hero-badge">Research prototype · FCFE first · Educational use</span></div>''',unsafe_allow_html=True)
+st.markdown(f'''<div class="visitor-counter-card"><div class="welcome">Welcome to StockValue AI!</div><div class="count">You are visitor #{st.session_state['visitor_number']:,}</div><div class="note">Total visitor sessions since the last app restart: {_visitor_count:,}.</div></div>''',unsafe_allow_html=True)
 st.caption('Public data via Yahoo Finance/yfinance is unofficial and may be delayed or incomplete. This dashboard is for educational research—not investment advice.')
+st.markdown('Feedback on StockValue AI is welcome: [send feedback to byi328@gmail.com](mailto:byi328@gmail.com)')
+
+# Main-page lookup remains available even when the sidebar is collapsed.
+with st.container():
+    st.markdown('### Quick ticker lookup')
+    _main_query_col,_main_button_col=st.columns([4,1])
+    with _main_query_col:
+        main_security_query=st.text_input('Company name or ticker',value='MSFT',key='main_security_query',label_visibility='collapsed',placeholder='Enter a company name or ticker')
+    with _main_button_col:
+        main_load=st.button('Analyze',type='primary',use_container_width=True,key='main_analyze_button')
 
 @st.cache_data(ttl=900,show_spinner=False)
 def load_stock_cached(symbol):
@@ -57,7 +109,21 @@ def resolve_ticker_cached(query):
 
 @st.cache_data(ttl=900,show_spinner=False)
 def load_news_dates_cached(symbol):
-    return get_news_and_dates(symbol)
+    try:
+        return get_news_and_dates(symbol)
+    except Exception:
+        return pd.DataFrame(columns=['Headline','Publisher','Published','Link']),pd.DataFrame(columns=['Event','Date'])
+
+@st.cache_data(ttl=900,show_spinner=False)
+def load_transaction_activity_cached(symbol):
+    try:
+        return get_transaction_activity(symbol)
+    except Exception:
+        return pd.DataFrame(),pd.DataFrame()
+
+@st.cache_data(ttl=300,show_spinner=False)
+def load_intraday_cached(symbol,interval,period):
+    return get_intraday_history(symbol,interval,period)
 
 @st.cache_data(ttl=900,show_spinner=False)
 def load_peer_table_cached(peer_symbols):
@@ -74,43 +140,231 @@ def secret_text(name,default=''):
     return str(value or '').strip()
 
 STARTING_VIRTUAL_CASH=100000.0
+TERMS_VERSION='2026-10-20'
+SUBSCRIBER_STORE_PATH=Path(os.environ.get('SUBSCRIBER_STORE_PATH',Path(__file__).with_name('subscriber_records.json')))
 
-def _password_hash(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+def _storage_key():
+    """Read the encryption key from deployment secrets, never from source code."""
+    try:
+        secret_key=st.secrets.get('SUBSCRIBER_STORE_KEY','')
+    except Exception:
+        secret_key=''
+    return str(os.environ.get('SUBSCRIBER_STORE_KEY') or secret_key or '').strip()
+
+def _decrypt_store():
+    if Fernet is None or not SUBSCRIBER_STORE_PATH.exists():
+        return None
+    key=_storage_key()
+    if not key:
+        return None
+    try:
+        raw=SUBSCRIBER_STORE_PATH.read_bytes()
+        if not raw.startswith(b'SVAI-ENCRYPTED-1\n'):
+            return None
+        decrypted=Fernet(key.encode('utf-8')).decrypt(raw.split(b'\n',1)[1])
+        return json.loads(decrypted.decode('utf-8'))
+    except (InvalidToken,ValueError,TypeError,json.JSONDecodeError,OSError):
+        return None
+FORUM_EXTREME_TERMS={
+    'guaranteed winner','guaranteed win','cannot lose','can’t lose','no risk',
+    'certainly double','will double','to the moon','all in','sell everything',
+    'zero chance of loss','100% guaranteed','sure thing','bankrupt tomorrow',
+    'going to zero','definitely crash','guaranteed crash'
+}
+
+TERMS_AND_AGREEMENT='''
+### StockValue AI subscriber terms and agreement
+
+By creating an account, you acknowledge and agree that:
+
+1. **Educational information only.** StockValue AI provides educational research tools, estimates, charts, market data, and discussion features. The information is not investment, financial, legal, tax, or accounting advice.
+2. **Do not rely on one output.** Estimated values, technical signals, news, and user posts may be incomplete, delayed, inaccurate, or based on assumptions. You will not use any estimate or post as your sole support for buying, selling, or holding a stock or ETF. You will independently investigate and consider your objectives, risk tolerance, diversification, current filings, and qualified professional advice.
+3. **No guarantee.** StockValue AI does not guarantee the accuracy, completeness, timeliness, or profitability of any data, estimate, signal, or user contribution. Past performance does not predict future results.
+4. **Paper trading only.** Any account balance and trading activity in this prototype are simulated. No real money, brokerage account, or payment processing is involved.
+5. **Forum conduct.** You may share ideas and information respectfully, but you may not post market manipulation, fraud, personal information, spam, unlawful content, or extremely bullish or extremely bearish claims such as guaranteed profits, guaranteed losses, or instructions to go all-in. The owner may remove posts or suspend access.
+6. **User responsibility and limitation of responsibility.** You are responsible for your decisions and use of the app. To the maximum extent permitted by applicable law, the owner and developer are not responsible for losses, damages, missed opportunities, or other consequences arising from reliance on the app, its estimates, its data, or forum content. This provision does not eliminate rights or responsibilities that cannot legally be excluded.
+7. **Privacy and prototype storage.** Passwords are stored as one-way password hashes rather than plain text, and forum posts use an anonymous subscriber alias. When encrypted storage is configured, accounts, balances, posts, and watchlists are written as authenticated encrypted data; otherwise they remain session-only. Do not submit your real name, email address, brokerage credentials, account numbers, Social Security numbers, or other confidential information.
+
+This prototype is not a brokerage, investment adviser, research service, or recommendation service. By checking the agreement box, you confirm that you have read and accepted these terms.
+'''
+
+def _password_hash(password,salt=None):
+    salt=salt or secrets.token_hex(16)
+    digest=hashlib.pbkdf2_hmac('sha256',password.encode('utf-8'),salt.encode('utf-8'),310000).hex()
+    return f'pbkdf2_sha256$310000${salt}${digest}'
+
+def _verify_password(password,stored):
+    if isinstance(stored,str) and stored.startswith('pbkdf2_sha256$'):
+        try:
+            _,iterations,salt,digest=stored.split('$',3)
+            candidate=hashlib.pbkdf2_hmac('sha256',password.encode('utf-8'),salt.encode('utf-8'),int(iterations)).hex()
+            return secrets.compare_digest(candidate,digest)
+        except (ValueError,TypeError):
+            return False
+    # Support accounts created by the earlier prototype and upgrade them at login.
+    return isinstance(stored,str) and secrets.compare_digest(stored,hashlib.sha256(password.encode('utf-8')).hexdigest())
 
 def _init_accounts():
     if 'sim_accounts' not in st.session_state:
-        st.session_state['sim_accounts']={}
+        try:
+            store_exists=SUBSCRIBER_STORE_PATH.exists()
+            saved=_decrypt_store()
+            if store_exists and saved is None:
+                st.session_state['subscriber_store_error']='Existing encrypted subscriber records could not be opened. Check SUBSCRIBER_STORE_KEY in Streamlit Secrets; the file was not overwritten.'
+            if isinstance(saved,dict):
+                if isinstance(saved,dict) and 'accounts' in saved:
+                    st.session_state['sim_accounts']=saved.get('accounts',{}) if isinstance(saved.get('accounts',{}),dict) else {}
+                    st.session_state['forum_posts']=saved.get('forum_posts',[]) if isinstance(saved.get('forum_posts',[]),list) else []
+                else:
+                    st.session_state['sim_accounts']=saved if isinstance(saved,dict) else {}
+            else:
+                st.session_state['sim_accounts']={}
+        except Exception:
+            if SUBSCRIBER_STORE_PATH.exists():
+                st.session_state['subscriber_store_error']='Existing subscriber records could not be loaded. The stored file was not overwritten.'
+            st.session_state['sim_accounts']={}
     if 'current_user' not in st.session_state:
         st.session_state['current_user']=None
+    if 'forum_posts' not in st.session_state:
+        st.session_state['forum_posts']=[]
+    # Do not expose historical login usernames in public forum posts.
+    for _post in st.session_state['forum_posts']:
+        if isinstance(_post,dict) and not str(_post.get('author','')).startswith('Subscriber-'):
+            _post['author']='Subscriber'
+
+def _save_subscriber_records():
+    """Persist subscriber records only as authenticated encrypted data."""
+    temporary_path=None
+    try:
+        if Fernet is None:
+            raise RuntimeError('cryptography is not installed')
+        key=_storage_key()
+        if not key:
+            raise RuntimeError('SUBSCRIBER_STORE_KEY is not configured')
+        SUBSCRIBER_STORE_PATH.parent.mkdir(parents=True,exist_ok=True)
+        payload={'accounts':st.session_state.get('sim_accounts',{}),'forum_posts':st.session_state.get('forum_posts',[]),'saved_at':datetime.now(timezone.utc).isoformat()}
+        encrypted=Fernet(key.encode('utf-8')).encrypt(json.dumps(payload).encode('utf-8'))
+        # Complete the encrypted write before replacing the prior store. This
+        # avoids leaving a partially written account file after an interruption.
+        temporary_path=SUBSCRIBER_STORE_PATH.with_name(SUBSCRIBER_STORE_PATH.name+'.tmp')
+        temporary_path.write_bytes(b'SVAI-ENCRYPTED-1\n'+encrypted)
+        os.replace(temporary_path,SUBSCRIBER_STORE_PATH)
+        st.session_state.pop('subscriber_store_error',None)
+    except Exception:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Do not expose secret/configuration details in the public UI.
+        st.session_state['subscriber_store_error']='Subscriber records could not be saved securely. Check the encrypted storage configuration; no plaintext copy was written.'
 
 def _account():
     username=st.session_state.get('current_user')
     return st.session_state['sim_accounts'].get(username) if username else None
 
-def _create_account(username,password):
+def _create_account(username,password,terms_accepted=False):
     username=username.strip().lower()
+    if not terms_accepted:
+        return False,'You must read and accept the StockValue AI subscriber terms before creating an account.'
     if len(username)<3 or len(password)<6:
         return False,'Use a username with at least 3 characters and a password with at least 6 characters.'
     if username in st.session_state['sim_accounts']:
         return False,'That simulated account already exists. Please log in.'
     st.session_state['sim_accounts'][username]={
         'password_hash':_password_hash(password),
+        'display_alias':f'Subscriber-{secrets.token_hex(4).upper()}',
         'cash':STARTING_VIRTUAL_CASH,
         'holdings':{},
+        'open_orders':[],
         'watchlist':{},
         'transactions':[],
+        'terms_version':TERMS_VERSION,
+        'terms_accepted_at':datetime.now(timezone.utc).isoformat(),
         'created_at':datetime.now(timezone.utc).isoformat()
     }
     st.session_state['current_user']=username
+    _save_subscriber_records()
     return True,'Account created with $100,000 virtual cash.'
+
+def _validate_forum_post(title,body):
+    text=f'{title} {body}'.strip().lower()
+    if len(title.strip())<5:
+        return False,'Please provide a descriptive title of at least five characters.'
+    if len(body.strip())<20:
+        return False,'Please provide at least 20 characters so other subscribers can understand your thought.'
+    if len(title)>120 or len(body)>3000:
+        return False,'Please keep the title under 120 characters and the post under 3,000 characters.'
+    matched=[term for term in FORUM_EXTREME_TERMS if term in text]
+    if matched:
+        return False,'This post uses an extreme or guaranteed bullish/bearish claim. Please rewrite it as balanced, evidence-based analysis.'
+    exclamations=text.count('!')
+    uppercase_letters=sum(1 for char in f'{title} {body}' if char.isalpha() and char.isupper())
+    letters=sum(1 for char in f'{title} {body}' if char.isalpha())
+    if exclamations>=4 or (letters>=30 and uppercase_letters/max(letters,1)>.65):
+        return False,'Please avoid extremely promotional or alarmist formatting. Use measured language and explain the evidence.'
+    return True,''
 
 def _login(username,password):
     username=username.strip().lower()
     record=st.session_state['sim_accounts'].get(username)
-    if record and record['password_hash']==_password_hash(password):
+    if record and _verify_password(password,record.get('password_hash')):
+        if not str(record.get('password_hash','')).startswith('pbkdf2_sha256$'):
+            record['password_hash']=_password_hash(password)
+            _save_subscriber_records()
         st.session_state['current_user']=username
         return True
+
+def _execute_simulated_order(account,side,ticker,shares,execution_price,order_type):
+    """Execute a paper order at the simulated current price."""
+    shares=float(shares); execution_price=float(execution_price)
+    if side=='Buy':
+        cost=shares*execution_price
+        if cost>account['cash']:
+            return False,f'Order not executed: insufficient virtual cash for ${cost:,.2f}.'
+        position=account['holdings'].setdefault(ticker,{'shares':0.0,'avg_cost':0.0,'last_price':execution_price})
+        new_shares=position['shares']+shares
+        position['avg_cost']=(position['shares']*position['avg_cost']+cost)/new_shares
+        position['shares']=new_shares
+        position['last_price']=execution_price
+        account['cash']-=cost
+    else:
+        position=account['holdings'].get(ticker)
+        if position is None or shares>position['shares']:
+            return False,'Order not executed: insufficient virtual shares to sell.'
+        account['cash']+=shares*execution_price
+        position['shares']-=shares
+        position['last_price']=execution_price
+        if position['shares']<=1e-12:
+            del account['holdings'][ticker]
+    account['transactions'].append({'time':datetime.now(timezone.utc).isoformat(),'side':side.upper(),'ticker':ticker,'shares':shares,'price':execution_price,'order_type':order_type})
+    return True,f'{order_type} {side.lower()} order executed: {shares:g} share(s) of {ticker} at {execution_price:,.2f}.'
+
+def _order_triggered(order,current_price):
+    side=order['side']; order_type=order['order_type']; current_price=float(current_price)
+    if order_type=='Limit order':
+        return current_price<=order['limit_price'] if side=='Buy' else current_price>=order['limit_price']
+    if order_type=='Stop-loss order':
+        return current_price<=order['stop_price']
+    if order_type=='Stop-limit order':
+        return current_price<=order['stop_price'] and current_price>=order['limit_price']
+    return True
+
+def _process_open_orders(account,ticker,current_price):
+    messages=[]
+    remaining=[]
+    for order in account.setdefault('open_orders',[]):
+        if order['ticker']!=ticker or not _order_triggered(order,current_price):
+            remaining.append(order)
+            continue
+        ok,message=_execute_simulated_order(account,order['side'],ticker,order['shares'],current_price,order['order_type'])
+        messages.append(message)
+        if not ok:
+            remaining.append(order)
+    account['open_orders']=remaining
+    if messages:
+        _save_subscriber_records()
+    return messages
     return False
 
 _init_accounts()
@@ -121,6 +375,7 @@ with st.sidebar:
     st.caption('Enter a company name or ticker to begin a structured equity-research review.')
     st.markdown('### Free paper-trading prototype')
     st.caption('Create a simulated account to receive $100,000 in virtual cash. No real money is used.')
+    st.warning('Privacy: never enter your real name, email address, brokerage credentials, account numbers, Social Security number, or other confidential information in this prototype.')
     if st.session_state.get('current_user'):
         _user_record=_account()
         st.success(f"Signed in as **{st.session_state['current_user']}**")
@@ -133,16 +388,29 @@ with st.sidebar:
         _account_name=st.text_input('Username',key='account_name')
         _account_password=st.text_input('Password',type='password',key='account_password')
         if _account_mode=='Create account':
+            with st.expander('Read subscriber terms and agreement',expanded=False):
+                st.markdown(TERMS_AND_AGREEMENT)
+            _terms_accepted=st.checkbox('I have read and agree to the subscriber terms and agreement.',key='terms_accepted')
             if st.button('Subscribe free / create account',use_container_width=True):
-                _ok,_message=_create_account(_account_name,_account_password)
+                _ok,_message=_create_account(_account_name,_account_password,_terms_accepted)
                 (st.success if _ok else st.error)(_message)
                 if _ok: st.rerun()
         else:
             if st.button('Log in',use_container_width=True):
                 if _login(_account_name,_account_password): st.rerun()
                 else: st.error('Invalid simulated username or password.')
-    security_query=st.text_input('Company name or ticker','MSFT').strip()
-    load=st.button('Analyze stock',type='primary',use_container_width=True)
+    if Fernet is not None and _storage_key():
+        st.caption('Subscriber records are encrypted before writing. For reboot persistence on Streamlit Cloud, point SUBSCRIBER_STORE_PATH at a durable external or mounted store; the default local filesystem may reset.')
+    else:
+        st.warning('Encrypted subscriber storage is not configured. Records remain session-only and are not written to disk.')
+    if st.session_state.get('subscriber_store_error'):
+        st.error(st.session_state['subscriber_store_error'])
+    if st.button('Refresh live market data',use_container_width=True,key='refresh_live_data'):
+        st.cache_data.clear()
+        st.session_state['last_refresh_at']=datetime.now(timezone.utc).isoformat()
+        st.rerun()
+    security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
+    sidebar_load=st.button('Analyze stock',type='primary',use_container_width=True,key='sidebar_analyze_button')
     st.markdown('**Model settings**')
     growth=st.number_input('Annual FCF growth (%)',-90.0,100.0,7.0,0.5)/100
     discount=st.number_input('Discount rate / WACC (%)',0.1,60.0,10.0,0.5)/100
@@ -151,18 +419,39 @@ with st.sidebar:
     rf=st.number_input('Risk-free rate (%)',0.0,25.0,4.0,0.25)/100
     erp=st.number_input('Equity risk premium (%)',0.0,20.0,5.0,0.25)/100
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
-if load:
+lookup_clicked=bool(sidebar_load or main_load)
+# Route each button explicitly. The sidebar action takes precedence if a
+# rerun ever reports both button states, so clicking the green sidebar button
+# cannot accidentally reuse the main-page input.
+if sidebar_load:
+    lookup_query=security_query.strip()
+    lookup_source='sidebar'
+elif main_load:
+    lookup_query=main_security_query.strip()
+    lookup_source='main page'
+else:
+    lookup_query=''
+    lookup_source=''
+if lookup_clicked:
     with st.spinner('Retrieving public market data...'):
         try:
-            ticker=resolve_ticker_cached(security_query)
+            if not lookup_query:
+                raise ValueError('Enter a company name or ticker symbol.')
+            ticker=resolve_ticker_cached(lookup_query)
             st.session_state['result']=(ticker,load_stock_cached(ticker))
-            st.session_state['search_query']=security_query
+            st.session_state['search_query']=lookup_query
+            st.session_state['last_lookup_source']=lookup_source
+            st.session_state['last_data_retrieved_at']=datetime.now(timezone.utc).isoformat()
+            st.session_state['lookup_confirmation']=f'{ticker} loaded from the {lookup_source} Analyze button.'
         except Exception as exc:
             st.error(f'Live data unavailable: {exc}. Please try another ticker or retry later.')
             st.stop()
 if 'result' not in st.session_state:
     st.info('Enter a stock ticker and click **Analyze stock** to retrieve available live financial data.')
     st.stop()
+if st.session_state.get('lookup_confirmation'):
+    st.success(st.session_state['lookup_confirmation'])
+    st.session_state.pop('lookup_confirmation',None)
 _stored_ticker,_stored_data=st.session_state['result']
 if len(_stored_data)==5:  # compatibility with an already-running pre-growth session
     info,hist,market,cashflow,balance=_stored_data
@@ -172,6 +461,12 @@ else:
 ticker=_stored_ticker
 search_query=st.session_state.get('search_query',ticker)
 active_account=_account()
+_order_messages=[]
+if active_account is not None:
+    active_account.setdefault('open_orders',[])
+    _order_messages=_process_open_orders(active_account,ticker,float(hist['Close'].iloc[-1]))
+for _order_message in _order_messages:
+    st.success(_order_message)
 if active_account is not None and not hist.empty:
     _latest=hist.iloc[-1]
     active_account['watchlist'][ticker]={
@@ -185,6 +480,7 @@ if active_account is not None and not hist.empty:
         'Warning above':active_account['watchlist'].get(ticker,{}).get('Warning above'),
         'Warning below':active_account['watchlist'].get(ticker,{}).get('Warning below')
     }
+    _save_subscriber_records()
 from funds import security_route,etf_analysis
 if security_route(info)=='ETF':
     st.subheader(f"ETF research: {info.get('longName') or ticker} ({ticker})")
@@ -210,7 +506,15 @@ st.markdown('<div class="section-kicker">Company overview</div>',unsafe_allow_ht
 st.subheader(f"{info.get('longName') or ticker} ({ticker})")
 if search_query.strip().upper()!=ticker:
     st.caption(f'Search input: {search_query} | Resolved ticker: {ticker}')
-st.caption(f'Latest available adjusted price: {hist.index[-1].date()} | Currency: {currency} | Source: Yahoo Finance (unofficial)')
+st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Current market price</div><div class="amount">{price:,.2f} {currency}</div><div class="detail">Latest available adjusted close · {hist.index[-1].date()} · {"ETF" if security_route(info)=="ETF" else "Stock"}</div></div>''',unsafe_allow_html=True)
+_retrieved_at=st.session_state.get('last_data_retrieved_at')
+_retrieved_label='unknown time'
+if _retrieved_at:
+    try:
+        _retrieved_label=datetime.fromisoformat(_retrieved_at).strftime('%Y-%m-%d %H:%M UTC')
+    except ValueError:
+        pass
+st.caption(f'Latest available adjusted price: {hist.index[-1].date()} | Currency: {currency} | Source: Yahoo Finance (unofficial) | Retrieved: {_retrieved_label}')
 if currency!='USD': st.warning('Non-USD listing: all financial statement units and quote currencies must be checked for consistency before interpreting the DCF.')
 
 # Visible data-quality checks prevent missing provider fields from being mistaken for verified zeroes.
@@ -234,8 +538,9 @@ c3.metric('Trailing P/E',f"{info['trailingPE']:.1f}" if isinstance(info.get('tra
 c4.metric('Dividend yield',f"{info['dividendYield']*100:.2f}%" if isinstance(info.get('dividendYield'),(float,int)) else 'N/A')
 st.markdown('<div class="source-note">Market snapshot · Latest available quote and company summary fields</div>',unsafe_allow_html=True)
 news_df,dates_df=load_news_dates_cached(ticker)
-technical_df,technical_signals=technical_indicators(hist)
-valuation,news_technical,risk,fundamentals,portfolio,notes=st.tabs(['Intrinsic valuation','News & technical analysis','Risk & return','Financial fundamentals','Paper portfolio','Methods & caveats'])
+insider_df,institutional_df=load_transaction_activity_cached(ticker)
+technical_df=pd.DataFrame(); technical_signals=[]
+valuation,news_technical,risk,fundamentals,portfolio,forum,notes=st.tabs(['Intrinsic valuation','News & technical analysis','Risk & return','Financial fundamentals','Paper portfolio','Subscriber forum','Methods & caveats'])
 with valuation:
     fcf,fcf_source=extract_fcf(info,cashflow)
     shares=info.get('sharesOutstanding')
@@ -425,7 +730,11 @@ with valuation:
         st.caption('DDM requires a positive dividend and cost of equity above dividend growth.')
     st.markdown('### Valuation methods at a glance')
     summary_rows=[]
-    for method, value in [('FCFE', locals().get('fcfe_value') or locals().get('primary_result',{}).get('per_share')), ('Constant-growth EPS', locals().get('constant_growth_value')), ('DCF / FCFF', locals().get('intrinsic')), ('DDM', locals().get('ddm_value'))]:
+    _primary_result=locals().get('primary_result')
+    _primary_fcfe_value=locals().get('fcfe_value')
+    if not isinstance(_primary_fcfe_value,(int,float)) and isinstance(_primary_result,dict):
+        _primary_fcfe_value=_primary_result.get('per_share')
+    for method, value in [('FCFE',_primary_fcfe_value), ('Constant-growth EPS',locals().get('constant_growth_value')), ('DCF / FCFF',locals().get('intrinsic')), ('DDM',locals().get('ddm_value'))]:
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             summary_rows.append({'Method':method,'Estimated value / share':float(value),'Current price':price,'Upside / downside':float(value/price-1)})
     if summary_rows:
@@ -437,17 +746,68 @@ with valuation:
 with news_technical:
     st.markdown('### Major news and key dates')
     if not news_df.empty:
-        st.dataframe(news_df,hide_index=True,use_container_width=True)
+        st.dataframe(news_df,hide_index=True,use_container_width=True,column_config={'Link':st.column_config.LinkColumn('Source article',display_text='Open article')})
     else:
         st.info('No recent news was returned by the public data provider.')
     if not dates_df.empty:
         st.markdown('#### Upcoming and reported dates')
-        st.dataframe(dates_df,hide_index=True,use_container_width=True)
+        st.dataframe(dates_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
     else:
         st.info('No earnings or corporate-event dates were returned by the public data provider.')
+    st.markdown('### Insider and institutional activity')
+    st.caption('The tables below separate reported insider records from institutional holding disclosures. A reported institutional holding is not proof of a purchase or sale, and an implied value/share is not necessarily the actual transaction price.')
+    if not insider_df.empty:
+        st.markdown('#### Insider transactions')
+        st.dataframe(insider_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
+    else:
+        st.info('No provider-reported insider transactions were returned.')
+    if not institutional_df.empty:
+        st.markdown('#### Institutional holdings reported')
+        st.dataframe(institutional_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
+    else:
+        st.info('No provider-reported institutional holdings were returned.')
+    st.warning('Truthfulness and timing check: these records come from a public provider and may be delayed, incomplete, restated, or mapped incorrectly. Before making a decision, open the source link and verify insider transactions against SEC Form 4 and institutional holdings against the institution\'s SEC filing (such as Form 13F).')
     st.caption('News, event dates, and prices come from public Yahoo Finance data and may be delayed, incomplete, or unavailable.')
 
     st.markdown('### Technical analysis')
+    chart_frequency=st.radio('Chart frequency',['Daily','Intraday / day trading'],horizontal=True,key='ta_chart_frequency')
+    analysis_history=hist
+    selected_interval=None
+    if chart_frequency=='Intraday / day trading':
+        selected_interval=st.selectbox('Intraday interval',['1m','2m','5m','15m','30m','60m'],index=2,key='ta_intraday_interval')
+        selected_period={'1m':'1d','2m':'5d','5m':'5d','15m':'5d','30m':'5d','60m':'1mo'}[selected_interval]
+        st.caption(f'Intraday mode uses {selected_interval} bars over approximately {selected_period}. Yahoo Finance limits the history available for minute data; quotes may be delayed and are not suitable as a sole basis for live trading.')
+        try:
+            analysis_history=load_intraday_cached(ticker,selected_interval,selected_period)
+        except Exception as exc:
+            analysis_history=pd.DataFrame()
+            st.error(f'Intraday data unavailable: {exc}')
+    else:
+        st.caption('Adjust the settings below to examine different daily or intraday technical-analysis horizons. The warnings and charts update using your selected periods.')
+    ta1,ta2,ta3=st.columns(3)
+    with ta1:
+        chart_max=max(60,min(len(analysis_history),1500))
+        chart_window_label='Chart lookback (bars)' if chart_frequency=='Intraday / day trading' else 'Chart lookback (days)'
+        chart_window=st.slider(chart_window_label,60,chart_max,min(260,chart_max),10,key='ta_chart_window')
+        ma_fast=st.number_input('Fast moving average',2,100,20,1,key='ta_ma_fast')
+    with ta2:
+        ma_medium=st.number_input('Medium moving average',2,250,50,1,key='ta_ma_medium')
+        ma_long=st.number_input('Long moving average',2,500,200,1,key='ta_ma_long')
+    with ta3:
+        bollinger_period=st.number_input('Bollinger period',2,200,20,1,key='ta_bb_period')
+        bollinger_std=st.number_input('Bollinger deviations',0.5,5.0,2.0,0.1,key='ta_bb_std')
+    ta4,ta5=st.columns(2)
+    with ta4:
+        rsi_period=st.number_input('RSI period',2,100,14,1,key='ta_rsi_period')
+    with ta5:
+        macd_fast=st.number_input('MACD fast period',2,50,12,1,key='ta_macd_fast')
+        macd_slow=st.number_input('MACD slow period',3,100,26,1,key='ta_macd_slow')
+        macd_signal=st.number_input('MACD signal period',2,50,9,1,key='ta_macd_signal')
+    try:
+        technical_df,technical_signals=technical_indicators(analysis_history,(ma_fast,ma_medium,ma_long),bollinger_period,bollinger_std,rsi_period,(macd_fast,macd_slow,macd_signal))
+    except ValueError as exc:
+        st.error(str(exc))
+        technical_df=pd.DataFrame(); technical_signals=[]
     if technical_df.empty:
         st.warning('Technical indicators are unavailable because sufficient OHLC data was not returned.')
     else:
@@ -457,26 +817,29 @@ with news_technical:
                 (st.warning if level=='warning' else st.info)(message)
         else:
             st.success('No configured high-priority technical signals were detected on the latest observations.')
-        chart_df=technical_df.tail(260).reset_index()
+        ma_columns=[f'MA{ma_fast}',f'MA{ma_medium}',f'MA{ma_long}']
+        chart_columns=['Close']+ma_columns+['BB_Upper','BB_Lower']
+        rsi_column=f'RSI{rsi_period}'
+        chart_df=technical_df.tail(chart_window).reset_index()
         chart_df=chart_df.rename(columns={chart_df.columns[0]:'Date'})
         try:
             import altair as alt
             base=alt.Chart(chart_df).encode(x=alt.X('Date:T',title='Date'))
             wick=base.mark_rule().encode(y=alt.Y('Low:Q',title='Price'),y2='High:Q',color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545')))
             body=base.mark_bar(size=5).encode(y='Open:Q',y2='Close:Q',color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545')))
-            bands=base.transform_fold(['MA20','MA50','MA200','BB_Upper','BB_Lower'],as_=['Indicator','Value']).mark_line().encode(y='Value:Q',color='Indicator:N')
+            bands=base.transform_fold(ma_columns+['BB_Upper','BB_Lower'],as_=['Indicator','Value']).mark_line().encode(y='Value:Q',color='Indicator:N')
             st.altair_chart((wick+body+bands).interactive(),use_container_width=True)
         except Exception:
-            st.line_chart(technical_df[['Close','MA20','MA50','MA200','BB_Upper','BB_Lower']].tail(260))
+            st.line_chart(technical_df[chart_columns].tail(chart_window))
             st.caption('Candlestick rendering was unavailable in this environment; the fallback chart still shows price, moving averages, and Bollinger Bands.')
         latest_tech=technical_df.iloc[-1]
         q1,q2,q3=st.columns(3)
-        q1.metric('RSI (14)',f"{latest_tech['RSI14']:.1f}" if pd.notna(latest_tech['RSI14']) else 'N/A')
+        q1.metric(f'RSI ({rsi_period})',f"{latest_tech[rsi_column]:.1f}" if pd.notna(latest_tech[rsi_column]) else 'N/A')
         q2.metric('MACD',f"{latest_tech['MACD']:.2f}" if pd.notna(latest_tech['MACD']) else 'N/A')
         q3.metric('MACD signal',f"{latest_tech['MACD_Signal']:.2f}" if pd.notna(latest_tech['MACD_Signal']) else 'N/A')
         st.markdown('#### RSI and MACD')
-        st.line_chart(technical_df[['RSI14']].tail(260))
-        st.line_chart(technical_df[['MACD','MACD_Signal','MACD_Hist']].tail(260))
+        st.line_chart(technical_df[[rsi_column]].tail(chart_window))
+        st.line_chart(technical_df[['MACD','MACD_Signal','MACD_Hist']].tail(chart_window))
         st.caption('Technical signals are screening indicators, not standalone buy or sell recommendations. Candlestick patterns use approximate rules and should be confirmed with price, volume, trend, and fundamental analysis.')
 
 with risk:
@@ -520,42 +883,66 @@ with portfolio:
         p1.metric('Virtual cash',f"${active_account['cash']:,.2f}")
         p2.metric('Holdings value',f"${total_holdings_value:,.2f}")
         p3.metric('Paper account value',f"${active_account['cash']+total_holdings_value:,.2f}")
+        st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Paper portfolio balance</div><div class="amount">${active_account['cash']+total_holdings_value:,.2f}</div><div class="detail">Virtual cash: ${active_account['cash']:,.2f} · Holdings: ${total_holdings_value:,.2f}</div></div>''',unsafe_allow_html=True)
         if valuation_rows:
             st.dataframe(pd.DataFrame(valuation_rows),hide_index=True,use_container_width=True)
         else:
             st.info('No paper positions yet. Analyze a stock or ETF, then place a simulated order below.')
         st.markdown('#### Simulated order')
-        order_side=st.radio('Order type',['Buy','Sell'],horizontal=True,key='paper_order_side')
+        with st.expander('Order types explained',expanded=False):
+            st.markdown('''
+            - **Market order:** executes immediately at the latest simulated price. The exact execution price may differ from the displayed quote in real markets.
+            - **Limit order:** executes only at your limit price or a more favorable price. A buy limit executes at or below the limit; a sell limit executes at or above it. Unfilled orders remain open.
+            - **Stop-loss order:** a simulated sell order that activates when the price reaches or falls below your stop price. It is designed to limit losses but cannot guarantee an execution price in a real market.
+            - **Stop-limit order:** activates at the stop price and then requires the current simulated price to meet your limit price. It offers price control but may remain unfilled.
+
+            These are educational paper-trading simulations. They do not model intraday prices, market gaps, order-book depth, commissions, taxes, or slippage.
+            ''')
+        order_side=st.radio('Side',['Buy','Sell'],horizontal=True,key='paper_order_side')
+        order_type=st.selectbox('Order type',['Market order','Limit order','Stop-loss order','Stop-limit order'],key='paper_order_type')
         order_shares=st.number_input(f'{order_side} shares of {ticker}',min_value=0.0,value=0.0,step=1.0,key='paper_order_shares')
-        if st.button(f'{order_side} {ticker}',type='primary',key='paper_order_button'):
+        limit_price=None; stop_price=None
+        if order_type=='Limit order':
+            limit_price=st.number_input('Limit price',min_value=0.01,value=float(price),step=0.01,key='paper_limit_price')
+        elif order_type=='Stop-loss order':
+            if order_side!='Sell':
+                st.info('A stop-loss order is a sell order. Choose Sell, or use a market/limit order to buy.')
+            stop_price=st.number_input('Stop price',min_value=0.01,value=float(price),step=0.01,key='paper_stop_price')
+        elif order_type=='Stop-limit order':
+            if order_side!='Sell':
+                st.info('This prototype supports stop-limit orders as sell orders. Choose Sell.')
+            stop_price=st.number_input('Stop price',min_value=0.01,value=float(price),step=0.01,key='paper_stop_limit_stop')
+            limit_price=st.number_input('Limit price after stop triggers',min_value=0.01,value=float(price),step=0.01,key='paper_stop_limit_price')
+        if st.button(f'Place {order_type} · {order_side} {ticker}',type='primary',key='paper_order_button'):
             if order_shares<=0:
                 st.error('Enter a number of shares greater than zero.')
-            elif order_side=='Buy':
-                cost=order_shares*price
-                if cost>active_account['cash']:
-                    st.error(f'Insufficient virtual cash. This order requires ${cost:,.2f}.')
-                else:
-                    position=active_account['holdings'].setdefault(ticker,{'shares':0.0,'avg_cost':0.0,'last_price':price})
-                    new_shares=position['shares']+order_shares
-                    position['avg_cost']=(position['shares']*position['avg_cost']+cost)/new_shares
-                    position['shares']=new_shares
-                    position['last_price']=price
-                    active_account['cash']-=cost
-                    active_account['transactions'].append({'time':datetime.now(timezone.utc).isoformat(),'side':'BUY','ticker':ticker,'shares':order_shares,'price':price})
-                    st.success(f'Bought {order_shares:g} share(s) of {ticker} at {price:,.2f}.')
-                    st.rerun()
+            elif order_type in ('Stop-loss order','Stop-limit order') and order_side!='Sell':
+                st.error(f'{order_type} is available as a sell order in this prototype.')
             else:
-                position=active_account['holdings'].get(ticker)
-                if position is None or order_shares>position['shares']:
-                    st.error('You do not have enough virtual shares to sell.')
+                order={'ticker':ticker,'side':order_side,'shares':float(order_shares),'order_type':order_type,'created_at':datetime.now(timezone.utc).isoformat()}
+                if limit_price is not None: order['limit_price']=float(limit_price)
+                if stop_price is not None: order['stop_price']=float(stop_price)
+                if order_type=='Market order' or _order_triggered(order,price):
+                    _ok,_message=_execute_simulated_order(active_account,order_side,ticker,order_shares,price,order_type)
+                    if _ok:
+                        _save_subscriber_records(); st.success(_message); st.rerun()
+                    else:
+                        st.error(_message)
                 else:
-                    active_account['cash']+=order_shares*price
-                    position['shares']-=order_shares
-                    position['last_price']=price
-                    active_account['transactions'].append({'time':datetime.now(timezone.utc).isoformat(),'side':'SELL','ticker':ticker,'shares':order_shares,'price':price})
-                    if position['shares']<=1e-12: del active_account['holdings'][ticker]
-                    st.success(f'Sold {order_shares:g} share(s) of {ticker} at {price:,.2f}.')
+                    active_account.setdefault('open_orders',[]).append(order)
+                    _save_subscriber_records()
+                    st.success(f'{order_type} accepted and kept open. It will be checked when a new simulated price is retrieved for {ticker}.')
                     st.rerun()
+        if active_account.get('open_orders'):
+            st.markdown('#### Open simulated orders')
+            st.dataframe(pd.DataFrame(active_account['open_orders']),hide_index=True,use_container_width=True)
+        if active_account.get('transactions'):
+            st.markdown('#### Paper transaction history')
+            transaction_df=pd.DataFrame(active_account['transactions'])
+            st.dataframe(transaction_df.sort_values('time',ascending=False).head(100),hide_index=True,use_container_width=True)
+            st.download_button('Download paper transaction history',transaction_df.to_csv(index=False).encode('utf-8'),file_name=f'{ticker}_paper_transactions.csv',mime='text/csv',key=f'download_transactions_{ticker}')
+        else:
+            st.caption('Executed paper transactions will appear here.')
         st.markdown('#### Automatic watchlist')
         watch_rows=list(active_account['watchlist'].values())
         if watch_rows:
@@ -569,6 +956,7 @@ with portfolio:
             if st.button(f'Save {ticker} price warnings',key=f'save_warnings_{ticker}'):
                 current_watch['Warning above']=warn_above if warn_above>0 else None
                 current_watch['Warning below']=warn_below if warn_below>0 else None
+                _save_subscriber_records()
                 st.success('Price warnings saved for this simulated account.')
             if current_watch.get('Warning above') and current_watch['Close']>=current_watch['Warning above']:
                 st.warning(f"{ticker} is at or above your warning price of ${current_watch['Warning above']:,.2f}.")
@@ -576,6 +964,49 @@ with portfolio:
                 st.warning(f"{ticker} is at or below your warning price of ${current_watch['Warning below']:,.2f}.")
         else:
             st.info('Your watchlist will populate automatically when you analyze a stock or ETF.')
+
+with forum:
+    st.markdown('### Subscriber stock and ETF forum')
+    st.caption('Share research observations, questions, news, and balanced risk discussions. Forum posts are educational opinions—not recommendations.')
+    st.info('Extremely bullish or bearish claims, guaranteed outcomes, alarmist language, market manipulation, spam, and confidential personal information are prohibited.')
+    if active_account is None:
+        st.warning('Create an account and accept the subscriber terms to participate in the forum.')
+    else:
+        with st.form('forum_post_form',clear_on_submit=True):
+            forum_ticker=st.text_input('Stock or ETF ticker',value=ticker,max_chars=16).strip().upper()
+            forum_title=st.text_input('Post title',max_chars=120,placeholder='Example: What risks should investors monitor?')
+            forum_type=st.selectbox('Discussion type',['Balanced analysis','Question','News or filing discussion','Risk discussion'])
+            forum_body=st.text_area('Your information or thoughts',max_chars=3000,height=150,placeholder='Describe the evidence, assumptions, uncertainty, and possible risks. Avoid guaranteed or extreme claims.')
+            forum_submit=st.form_submit_button('Publish post',type='primary')
+        if forum_submit:
+            _valid,_forum_message=_validate_forum_post(forum_title,forum_body)
+            if not forum_ticker or not all(char.isalnum() or char in '.-^' for char in forum_ticker):
+                _valid=False
+                _forum_message='Enter a valid stock or ETF ticker.'
+            if _valid:
+                st.session_state['forum_posts'].append({
+                    'ticker':forum_ticker,
+                    'title':forum_title.strip(),
+                    'type':forum_type,
+                    'body':forum_body.strip(),
+                    'author':active_account.get('display_alias','Subscriber'),
+                    'created_at':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+                })
+                _save_subscriber_records()
+                st.success('Your balanced discussion post was published.')
+            else:
+                st.error(_forum_message)
+    st.markdown('#### Recent community posts')
+    if not st.session_state['forum_posts']:
+        st.info('No posts yet. Be the first subscriber to start a balanced discussion.')
+    else:
+        for _post in reversed(st.session_state['forum_posts'][-50:]):
+            with st.container(border=True):
+                st.markdown(f"**{_post['title']}** · `{_post['ticker']}`")
+                st.caption(f"{_post['type']} · Posted by {_post['author']} · {_post['created_at']}")
+                st.write(_post['body'])
+    st.caption('Forum moderation is an automated prototype filter and cannot detect every problematic post. Report or avoid relying on any user contribution as financial advice.')
+
 with notes:
     st.markdown('''**Data provenance:** yfinance retrieves public Yahoo Finance data using an unofficial interface; reliability, redistribution rights, availability and update timing are not guaranteed. The app does not use a paid API key.\n\n**FCFE model:** FCFE = CFO - capex + net borrowing; use the cost of equity and do not subtract debt again. The net-borrowing field must be verified against the statement of cash flows. The DDM also uses the cost of equity.\n\n**DCF limitation:** This is an educational screening calculation. A robust enterprise DCF requires forecast *unlevered* free cash flow (FCFF), a consistent WACC, and net-debt reconciliation. For a levered free-cash-flow-to-equity (FCFE) model, discount at cost of equity and do **not** subtract net debt.\n\n**Risk:** Beta, Sharpe ratio and volatility are historical estimates. CAPM expected return depends on assumed risk-free rate and equity premium. Price-only historical returns are not total returns.\n\n**Decision support:** No automatic buy/sell recommendation is generated. Verify financial statements, dilution, one-time items, currency, debt, industry cyclicality and assumptions before investing. No price feed or estimate is guaranteed real-time.''')
 
