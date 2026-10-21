@@ -32,6 +32,7 @@ def get_news_and_dates(ticker):
     """Retrieve recent Yahoo Finance news and available event dates."""
     import yfinance as yf
     obj=yf.Ticker(ticker)
+    calendar_source=f'https://finance.yahoo.com/quote/{ticker}/calendar/'
     news=[]
     try:
         for item in (obj.news or [])[:12]:
@@ -59,22 +60,86 @@ def get_news_and_dates(ticker):
         if isinstance(calendar,pd.DataFrame):
             for key,value in calendar.items():
                 values=value.dropna().tolist() if hasattr(value,'dropna') else [value]
-                dates.append({'Event':str(key),'Date':', '.join(str(x) for x in values)})
+                dates.append({'Event':str(key),'Date':', '.join(str(x) for x in values),'Source':calendar_source})
         elif isinstance(calendar,dict):
             for key,value in calendar.items():
                 values=value if isinstance(value,(list,tuple,pd.Series)) else [value]
-                dates.append({'Event':str(key),'Date':', '.join(str(x) for x in values)})
+                dates.append({'Event':str(key),'Date':', '.join(str(x) for x in values),'Source':calendar_source})
     except Exception:
         pass
     try:
         earnings_dates=obj.get_earnings_dates(limit=8)
         if earnings_dates is not None and not earnings_dates.empty:
             for date in earnings_dates.index[:8]:
-                dates.append({'Event':'Earnings date','Date':str(pd.Timestamp(date))})
+                dates.append({'Event':'Earnings date','Date':str(pd.Timestamp(date)),'Source':calendar_source})
     except Exception:
         pass
-    dates_df=pd.DataFrame(dates).drop_duplicates() if dates else pd.DataFrame(columns=['Event','Date'])
+    dates_df=pd.DataFrame(dates).drop_duplicates() if dates else pd.DataFrame(columns=['Event','Date','Source'])
     return news_df,dates_df
+
+
+def get_transaction_activity(ticker):
+    """Retrieve provider-reported insider activity and institutional holdings.
+
+    Insider rows may include reported shares and value; unit price is calculated
+    only when both are available. Institutional-holder rows are holdings
+    disclosures, not confirmed trade tickets, so they are never labeled as
+    exact purchases or sales.
+    """
+    import yfinance as yf
+    ticker=str(ticker).strip().upper()
+    obj=yf.Ticker(ticker)
+    insider_columns=['Date','Insider','Transaction','Shares','Reported value','Reported price/share','Source','Verification']
+    institution_columns=['Date reported','Institution','Shares reported','Reported value','Reported value/share','Source','Verification']
+    insider_rows=[]
+    institutional_rows=[]
+    insider_source=f'https://finance.yahoo.com/quote/{ticker}/insider-transactions/'
+    institutional_source=f'https://finance.yahoo.com/quote/{ticker}/holders/'
+
+    try:
+        insider=getattr(obj,'insider_transactions',None)
+        if insider is not None and not insider.empty:
+            for index,row in insider.reset_index().iterrows():
+                date=row.get('Start Date',row.get('StartDate',row.get('Date',index)))
+                shares=pd.to_numeric(row.get('Shares'),errors='coerce')
+                value=pd.to_numeric(row.get('Value'),errors='coerce')
+                price=value/shares if pd.notna(value) and pd.notna(shares) and shares!=0 else float('nan')
+                insider_rows.append({
+                    'Date':str(pd.to_datetime(date,errors='coerce').date()) if pd.notna(pd.to_datetime(date,errors='coerce')) else 'Date unavailable',
+                    'Insider':row.get('Filer Name',row.get('FilerName','Not reported')),
+                    'Transaction':row.get('Transaction',row.get('Text','Not reported')),
+                    'Shares':float(shares) if pd.notna(shares) else None,
+                    'Reported value':float(value) if pd.notna(value) else None,
+                    'Reported price/share':float(price) if pd.notna(price) else None,
+                    'Source':insider_source,
+                    'Verification':'Provider-reported insider record; verify the corresponding SEC Form 4 before relying on it.'
+                })
+    except Exception:
+        pass
+
+    try:
+        holders=getattr(obj,'institutional_holders',None)
+        if holders is not None and not holders.empty:
+            for index,row in holders.reset_index().iterrows():
+                date=row.get('Date Reported',row.get('DateReported',row.get('Date',index)))
+                shares=pd.to_numeric(row.get('Shares'),errors='coerce')
+                value=pd.to_numeric(row.get('Value'),errors='coerce')
+                implied=value/shares if pd.notna(value) and pd.notna(shares) and shares!=0 else float('nan')
+                institutional_rows.append({
+                    'Date reported':str(pd.to_datetime(date,errors='coerce').date()) if pd.notna(pd.to_datetime(date,errors='coerce')) else 'Date unavailable',
+                    'Institution':row.get('Holder',row.get('Institution','Not reported')),
+                    'Shares reported':float(shares) if pd.notna(shares) else None,
+                    'Reported value':float(value) if pd.notna(value) else None,
+                    'Reported value/share':float(implied) if pd.notna(implied) else None,
+                    'Source':institutional_source,
+                    'Verification':'Reported institutional holding snapshot; this is not an exact transaction price or trade record. Verify the institution\'s SEC filing.'
+                })
+    except Exception:
+        pass
+
+    insider_df=pd.DataFrame(insider_rows,columns=insider_columns)
+    institutional_df=pd.DataFrame(institutional_rows,columns=institution_columns)
+    return insider_df,institutional_df
 
 
 def technical_indicators(history):
