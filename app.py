@@ -409,8 +409,11 @@ with st.sidebar:
         st.cache_data.clear()
         st.session_state['last_refresh_at']=datetime.now(timezone.utc).isoformat()
         st.rerun()
-    security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
-    sidebar_load=st.button('Analyze stock',type='primary',use_container_width=True,key='sidebar_analyze_button')
+    # Submit the ticker and sidebar action as one event so the current input
+    # cannot be lost during Streamlit's rerun.
+    with st.form('sidebar_lookup_form',clear_on_submit=False):
+        security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
+        sidebar_load=st.form_submit_button('Analyze stock',type='primary',use_container_width=True)
     st.markdown('**Model settings**')
     growth=st.number_input('Annual FCF growth (%)',-90.0,100.0,7.0,0.5)/100
     discount=st.number_input('Discount rate / WACC (%)',0.1,60.0,10.0,0.5)/100
@@ -788,7 +791,8 @@ with news_technical:
     with ta1:
         chart_max=max(60,min(len(analysis_history),1500))
         chart_window_label='Chart lookback (bars)' if chart_frequency=='Intraday / day trading' else 'Chart lookback (days)'
-        chart_window=st.slider(chart_window_label,60,chart_max,min(260,chart_max),10,key='ta_chart_window')
+        chart_default=min(120 if chart_frequency=='Intraday / day trading' else 260,chart_max)
+        chart_window=st.slider(chart_window_label,60,chart_max,chart_default,10,key='ta_chart_window')
         ma_fast=st.number_input('Fast moving average',2,100,20,1,key='ta_ma_fast')
     with ta2:
         ma_medium=st.number_input('Medium moving average',2,250,50,1,key='ta_ma_medium')
@@ -861,10 +865,10 @@ with news_technical:
                 price_chart=(wick+body+close_line)
                 if intraday_overlay_columns:
                     price_chart=price_chart+overlays
-                price_chart=price_chart.properties(height=410)
+                price_chart=price_chart.properties(height=350)
                 volume=alt.Chart(chart_df).mark_bar(size=8).encode(
                     x=x_encoding,y=alt.Y('Volume:Q',title='Volume'),color=candle_color,
-                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Volume:Q',format=',.0f')]).properties(height=125)
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Volume:Q',format=',.0f')]).properties(height=95)
                 st.altair_chart((price_chart & volume).interactive(),use_container_width=True)
             else:
                 base=alt.Chart(chart_df).encode(x=alt.X('Date:T',title='Date'))
