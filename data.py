@@ -89,8 +89,8 @@ def get_transaction_activity(ticker):
     import yfinance as yf
     ticker=str(ticker).strip().upper()
     obj=yf.Ticker(ticker)
-    insider_columns=['Date','Insider','Transaction','Shares','Reported value','Reported price/share','Source','Verification']
-    institution_columns=['Date reported','Institution','Shares reported','Reported value','Reported value/share','Source','Verification']
+    insider_columns=['Date','Insider','Insider title','Transaction','Shares','Reported value','Reported price/share','Source','Verification']
+    institution_columns=['Date reported','Institution name','Shares reported','Reported value','Reported value/share','Source','Verification']
     insider_rows=[]
     institutional_rows=[]
     insider_source=f'https://finance.yahoo.com/quote/{ticker}/insider-transactions/'
@@ -107,6 +107,7 @@ def get_transaction_activity(ticker):
                 insider_rows.append({
                     'Date':str(pd.to_datetime(date,errors='coerce').date()) if pd.notna(pd.to_datetime(date,errors='coerce')) else 'Date unavailable',
                     'Insider':row.get('Filer Name',row.get('FilerName','Not reported')),
+                    'Insider title':row.get('Position',row.get('Title',row.get('Relationship',row.get('Role','Not reported')))),
                     'Transaction':row.get('Transaction',row.get('Text','Not reported')),
                     'Shares':float(shares) if pd.notna(shares) else None,
                     'Reported value':float(value) if pd.notna(value) else None,
@@ -127,7 +128,7 @@ def get_transaction_activity(ticker):
                 implied=value/shares if pd.notna(value) and pd.notna(shares) and shares!=0 else float('nan')
                 institutional_rows.append({
                     'Date reported':str(pd.to_datetime(date,errors='coerce').date()) if pd.notna(pd.to_datetime(date,errors='coerce')) else 'Date unavailable',
-                    'Institution':row.get('Holder',row.get('Institution','Not reported')),
+                    'Institution name':row.get('Holder',row.get('Institution',row.get('Institution Name','Not reported'))),
                     'Shares reported':float(shares) if pd.notna(shares) else None,
                     'Reported value':float(value) if pd.notna(value) else None,
                     'Reported value/share':float(implied) if pd.notna(implied) else None,
