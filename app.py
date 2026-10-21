@@ -17,7 +17,7 @@ from engine import dcf_per_share, gordon, risk_metrics, fcfe_per_share, fcfe_fro
 from data import get_stock, get_intraday_history, extract_fcf, extract_fcfe_components, estimate_eps_growth, resolve_ticker, get_news_and_dates, get_transaction_activity, technical_indicators
 from advanced import three_stage_fcfe, implied_earnings_growth
 
-st.set_page_config(page_title='StockValue AI',page_icon='📈',layout='wide',initial_sidebar_state='expanded')
+st.set_page_config(page_title='StockValue AI',page_icon='ðŸ“ˆ',layout='wide',initial_sidebar_state='expanded')
 
 # Prototype-wide visitor counter. Each Streamlit session is counted once.
 # It resets when the app process is restarted because no external database is used.
@@ -70,6 +70,7 @@ st.markdown('''
     .visitor-counter-card .note { color:#d9ebf5; font-size:.78rem; margin-top:4px; }
     [data-testid="stTabs"] button { color:var(--muted); font-weight:650; }
     [data-testid="stTabs"] button[aria-selected="true"] { color:var(--blue); border-bottom-color:var(--teal); }
+    [data-testid="stTabs"] > div:first-child { position:sticky; top:0; z-index:20; background:rgba(255,255,255,.96); padding-top:4px; border-bottom:1px solid var(--line); }
     [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
     [data-testid="stExpander"] { border:1px solid var(--line); border-radius:10px; background:#ffffff; }
     .research-hero { background:linear-gradient(120deg,#10243e 0%,#1f5f8b 100%); color:#ffffff; border-radius:16px; padding:25px 30px; margin:0 0 22px 0; box-shadow:0 10px 28px rgba(16,36,62,.16); }
@@ -84,9 +85,9 @@ st.markdown('''
 logo_path=Path(__file__).with_name('StockValueAI_logo_improved.png')
 if logo_path.exists():
     st.image(str(logo_path),width=150)
-st.markdown('''<div class="research-hero"><h1>StockValue AI</h1><p>Professional equity research dashboard for valuation, market context, and technical signals.</p><span class="hero-badge">Research prototype · FCFE first · Educational use</span></div>''',unsafe_allow_html=True)
+st.markdown('''<div class="research-hero"><h1>StockValue AI</h1><p>Professional equity research dashboard for valuation, market context, and technical signals.</p><span class="hero-badge">Research prototype Â· FCFE first Â· Educational use</span></div>''',unsafe_allow_html=True)
 st.markdown(f'''<div class="visitor-counter-card"><div class="welcome">Welcome to StockValue AI!</div><div class="count">You are visitor #{st.session_state['visitor_number']:,}</div><div class="note">Total visitor sessions since the last app restart: {_visitor_count:,}.</div></div>''',unsafe_allow_html=True)
-st.caption('Public data via Yahoo Finance/yfinance is unofficial and may be delayed or incomplete. This dashboard is for educational research—not investment advice.')
+st.caption('Public data via Yahoo Finance/yfinance is unofficial and may be delayed or incomplete. This dashboard is for educational researchâ€”not investment advice.')
 st.markdown('Feedback on StockValue AI is welcome: [send feedback to byi328@gmail.com](mailto:byi328@gmail.com)')
 
 # Main-page lookup remains available even when the sidebar is collapsed.
@@ -166,7 +167,7 @@ def _decrypt_store():
     except (InvalidToken,ValueError,TypeError,json.JSONDecodeError,OSError):
         return None
 FORUM_EXTREME_TERMS={
-    'guaranteed winner','guaranteed win','cannot lose','can’t lose','no risk',
+    'guaranteed winner','guaranteed win','cannot lose','canâ€™t lose','no risk',
     'certainly double','will double','to the moon','all in','sell everything',
     'zero chance of loss','100% guaranteed','sure thing','bankrupt tomorrow',
     'going to zero','definitely crash','guaranteed crash'
@@ -514,7 +515,7 @@ st.markdown('<div class="section-kicker">Company overview</div>',unsafe_allow_ht
 st.subheader(f"{info.get('longName') or ticker} ({ticker})")
 if search_query.strip().upper()!=ticker:
     st.caption(f'Search input: {search_query} | Resolved ticker: {ticker}')
-st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Current market price</div><div class="amount">{price:,.2f} {currency}</div><div class="detail">Latest available adjusted close · {hist.index[-1].date()} · {"ETF" if security_route(info)=="ETF" else "Stock"}</div></div>''',unsafe_allow_html=True)
+st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Current market price</div><div class="amount">{price:,.2f} {currency}</div><div class="detail">Latest available adjusted close Â· {hist.index[-1].date()} Â· {"ETF" if security_route(info)=="ETF" else "Stock"}</div></div>''',unsafe_allow_html=True)
 _retrieved_at=st.session_state.get('last_data_retrieved_at')
 _retrieved_label='unknown time'
 if _retrieved_at:
@@ -544,11 +545,12 @@ c1.metric('Latest adjusted close',f'{price:,.2f} {currency}')
 c2.metric('Market capitalization',f"{info['marketCap']/1e9:,.2f}B" if isinstance(info.get('marketCap'),(float,int)) else 'N/A')
 c3.metric('Trailing P/E',f"{info['trailingPE']:.1f}" if isinstance(info.get('trailingPE'),(int,float)) else 'N/A')
 c4.metric('Dividend yield',f"{info['dividendYield']*100:.2f}%" if isinstance(info.get('dividendYield'),(float,int)) else 'N/A')
-st.markdown('<div class="source-note">Market snapshot · Latest available quote and company summary fields</div>',unsafe_allow_html=True)
+st.markdown('<div class="source-note">Market snapshot Â· Latest available quote and company summary fields</div>',unsafe_allow_html=True)
 news_df,dates_df=load_news_dates_cached(ticker)
 insider_df,institutional_df=load_transaction_activity_cached(ticker)
 technical_df=pd.DataFrame(); technical_signals=[]
 valuation,news_technical,risk,fundamentals,portfolio,forum,notes=st.tabs(['Intrinsic valuation','News & technical analysis','Risk & return','Financial fundamentals','Paper portfolio','Subscriber forum','Methods & caveats'])
+st.markdown('[Jump to technical analysis](#technical-analysis-anchor)',unsafe_allow_html=True)
 with valuation:
     fcf,fcf_source=extract_fcf(info,cashflow)
     shares=info.get('sharesOutstanding')
@@ -608,7 +610,7 @@ with valuation:
         a.metric('Secondary DCF / FCFF value / share',f'{intrinsic:,.2f} {currency}')
         b.metric('Upside / downside vs price',f'{(intrinsic/price-1)*100:+.1f}%')
         c.metric('Margin of safety',f'{(1-price/intrinsic)*100:.1f}%' if intrinsic>0 else 'N/A')
-        st.caption(f"Terminal value share of enterprise value: {dcf['terminal_fraction']:.1%} — high values indicate sensitivity to terminal assumptions.")
+        st.caption(f"Terminal value share of enterprise value: {dcf['terminal_fraction']:.1%} â€” high values indicate sensitivity to terminal assumptions.")
         st.markdown('#### Discount-rate / growth sensitivity')
         rows=[]
         for g in [growth-0.02,growth,growth+0.02]:
@@ -629,7 +631,7 @@ with valuation:
         st.dataframe(pd.DataFrame(scenarios),hide_index=True,use_container_width=True)
     except ValueError as exc: st.info(f'DCF unavailable: {exc}')
     st.markdown('### Third: intrinsic value from the constant-growth EPS model')
-    st.caption('The estimated recent EPS growth rate is used as the future annual growth rate. The model is V₀ = EPS₁ / (cost of equity − growth), where EPS₁ = latest EPS × (1 + growth).')
+    st.caption('The estimated recent EPS growth rate is used as the future annual growth rate. The model is Vâ‚€ = EPSâ‚ / (cost of equity âˆ’ growth), where EPSâ‚ = latest EPS Ã— (1 + growth).')
     if eps_growth_data and constant_growth_value is not None:
         g1,g2,g3=st.columns(3)
         g1.metric('Constant-growth intrinsic value / share',f'{constant_growth_value:,.2f} {currency}')
@@ -641,7 +643,7 @@ with valuation:
     else:
         st.warning('A 10-, 5-, or 3-year positive diluted-EPS history was not available. The constant-growth EPS valuation cannot be calculated without valid positive endpoint EPS observations.')
     st.markdown('### Detailed FCFE assumptions and sensitivity analysis')
-    st.caption('FCFE = cash flow from operations − capital expenditures + net borrowing. Financial statement labels and signs must be verified. All values below are in billions of reporting currency.')
+    st.caption('FCFE = cash flow from operations âˆ’ capital expenditures + net borrowing. Financial statement labels and signs must be verified. All values below are in billions of reporting currency.')
     parts=extract_fcfe_components(cashflow)
     cfo_b=st.number_input('Annual operating cash flow (billions)',value=float(parts['cfo'] or 0)/1e9,format='%.4f',key='fcfe_cfo')
     capex_b=st.number_input('Annual capital expenditures, positive outflow (billions)',min_value=0.0,value=float(parts['capex'] or 0)/1e9,format='%.4f',key='fcfe_capex')
@@ -777,6 +779,7 @@ with news_technical:
     st.warning('Truthfulness and timing check: these records come from a public provider and may be delayed, incomplete, restated, or mapped incorrectly. Before making a decision, open the source link and verify insider transactions against SEC Form 4 and institutional holdings against the institution\'s SEC filing (such as Form 13F).')
     st.caption('News, event dates, and prices come from public Yahoo Finance data and may be delayed, incomplete, or unavailable.')
 
+    st.markdown('<div id="technical-analysis-anchor"></div>',unsafe_allow_html=True)
     st.markdown('### Technical analysis')
     chart_frequency=st.radio('Chart frequency',['Daily','Intraday / day trading'],horizontal=True,key='ta_chart_frequency')
     analysis_history=hist
@@ -944,7 +947,7 @@ with portfolio:
         p1.metric('Virtual cash',f"${active_account['cash']:,.2f}")
         p2.metric('Holdings value',f"${total_holdings_value:,.2f}")
         p3.metric('Paper account value',f"${active_account['cash']+total_holdings_value:,.2f}")
-        st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Paper portfolio balance</div><div class="amount">${active_account['cash']+total_holdings_value:,.2f}</div><div class="detail">Virtual cash: ${active_account['cash']:,.2f} · Holdings: ${total_holdings_value:,.2f}</div></div>''',unsafe_allow_html=True)
+        st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Paper portfolio balance</div><div class="amount">${active_account['cash']+total_holdings_value:,.2f}</div><div class="detail">Virtual cash: ${active_account['cash']:,.2f} Â· Holdings: ${total_holdings_value:,.2f}</div></div>''',unsafe_allow_html=True)
         if valuation_rows:
             st.dataframe(pd.DataFrame(valuation_rows),hide_index=True,use_container_width=True)
         else:
@@ -974,7 +977,7 @@ with portfolio:
                 st.info('This prototype supports stop-limit orders as sell orders. Choose Sell.')
             stop_price=st.number_input('Stop price',min_value=0.01,value=float(price),step=0.01,key='paper_stop_limit_stop')
             limit_price=st.number_input('Limit price after stop triggers',min_value=0.01,value=float(price),step=0.01,key='paper_stop_limit_price')
-        if st.button(f'Place {order_type} · {order_side} {ticker}',type='primary',key='paper_order_button'):
+        if st.button(f'Place {order_type} Â· {order_side} {ticker}',type='primary',key='paper_order_button'):
             if order_shares<=0:
                 st.error('Enter a number of shares greater than zero.')
             elif order_type in ('Stop-loss order','Stop-limit order') and order_side!='Sell':
@@ -1028,7 +1031,7 @@ with portfolio:
 
 with forum:
     st.markdown('### Subscriber stock and ETF forum')
-    st.caption('Share research observations, questions, news, and balanced risk discussions. Forum posts are educational opinions—not recommendations.')
+    st.caption('Share research observations, questions, news, and balanced risk discussions. Forum posts are educational opinionsâ€”not recommendations.')
     st.info('Extremely bullish or bearish claims, guaranteed outcomes, alarmist language, market manipulation, spam, and confidential personal information are prohibited.')
     if active_account is None:
         st.warning('Create an account and accept the subscriber terms to participate in the forum.')
@@ -1063,8 +1066,8 @@ with forum:
     else:
         for _post in reversed(st.session_state['forum_posts'][-50:]):
             with st.container(border=True):
-                st.markdown(f"**{_post['title']}** · `{_post['ticker']}`")
-                st.caption(f"{_post['type']} · Posted by {_post['author']} · {_post['created_at']}")
+                st.markdown(f"**{_post['title']}** Â· `{_post['ticker']}`")
+                st.caption(f"{_post['type']} Â· Posted by {_post['author']} Â· {_post['created_at']}")
                 st.write(_post['body'])
     st.caption('Forum moderation is an automated prototype filter and cannot detect every problematic post. Report or avoid relying on any user contribution as financial advice.')
 
