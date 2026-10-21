@@ -259,6 +259,10 @@ def _save_subscriber_records():
         # Do not expose secret/configuration details in the public UI.
         st.session_state['subscriber_store_error']='Subscriber records could not be saved securely. Check the encrypted storage configuration; no plaintext copy was written.'
 
+def _queue_sidebar_lookup():
+    """Preserve a sidebar Analyze click before Streamlit reruns the script."""
+    st.session_state['sidebar_lookup_requested']=True
+
 def _account():
     username=st.session_state.get('current_user')
     return st.session_state['sim_accounts'].get(username) if username else None
@@ -409,8 +413,11 @@ with st.sidebar:
         st.cache_data.clear()
         st.session_state['last_refresh_at']=datetime.now(timezone.utc).isoformat()
         st.rerun()
-    security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
-    sidebar_load=st.button('Analyze stock',type='primary',use_container_width=True,key='sidebar_analyze_button')
+    # Submit the ticker and sidebar action as one event so the current input
+    # cannot be lost during Streamlit's rerun.
+    with st.form('sidebar_lookup_form',clear_on_submit=False):
+        security_query=st.text_input('Company name or ticker','MSFT',key='sidebar_security_query').strip()
+        sidebar_load=st.form_submit_button('Analyze stock',type='primary',use_container_width=True,on_click=_queue_sidebar_lookup)
     st.markdown('**Model settings**')
     growth=st.number_input('Annual FCF growth (%)',-90.0,100.0,7.0,0.5)/100
     discount=st.number_input('Discount rate / WACC (%)',0.1,60.0,10.0,0.5)/100
@@ -419,11 +426,12 @@ with st.sidebar:
     rf=st.number_input('Risk-free rate (%)',0.0,25.0,4.0,0.25)/100
     erp=st.number_input('Equity risk premium (%)',0.0,20.0,5.0,0.25)/100
     st.caption('Defaults are illustrative assumptions, not company-specific forecasts.')
-lookup_clicked=bool(sidebar_load or main_load)
+sidebar_request=bool(st.session_state.pop('sidebar_lookup_requested',False))
+lookup_clicked=bool(sidebar_load or sidebar_request or main_load)
 # Route each button explicitly. The sidebar action takes precedence if a
 # rerun ever reports both button states, so clicking the green sidebar button
 # cannot accidentally reuse the main-page input.
-if sidebar_load:
+if sidebar_load or sidebar_request:
     lookup_query=security_query.strip()
     lookup_source='sidebar'
 elif main_load:
@@ -755,7 +763,7 @@ with news_technical:
     else:
         st.info('No earnings or corporate-event dates were returned by the public data provider.')
     st.markdown('### Insider and institutional activity')
-    st.caption('The tables below separate reported insider records from institutional holding disclosures. A reported institutional holding is not proof of a purchase or sale, and an implied value/share is not necessarily the actual transaction price.')
+    st.caption('The tables below separate reported insider records from institutional holding disclosures and include the reported insider title or institutional holder name when the provider supplies it. A reported institutional holding is not proof of a purchase or sale, and an implied value/share is not necessarily the actual transaction price.')
     if not insider_df.empty:
         st.markdown('#### Insider transactions')
         st.dataframe(insider_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
@@ -788,7 +796,8 @@ with news_technical:
     with ta1:
         chart_max=max(60,min(len(analysis_history),1500))
         chart_window_label='Chart lookback (bars)' if chart_frequency=='Intraday / day trading' else 'Chart lookback (days)'
-        chart_window=st.slider(chart_window_label,60,chart_max,min(260,chart_max),10,key='ta_chart_window')
+        chart_default=min(120 if chart_frequency=='Intraday / day trading' else 260,chart_max)
+        chart_window=st.slider(chart_window_label,60,chart_max,chart_default,10,key='ta_chart_window')
         ma_fast=st.number_input('Fast moving average',2,100,20,1,key='ta_ma_fast')
     with ta2:
         ma_medium=st.number_input('Medium moving average',2,250,50,1,key='ta_ma_medium')
@@ -824,13 +833,65 @@ with news_technical:
         chart_df=chart_df.rename(columns={chart_df.columns[0]:'Date'})
         try:
             import altair as alt
-            base=alt.Chart(chart_df).encode(x=alt.X('Date:T',title='Date'))
-            wick=base.mark_rule().encode(y=alt.Y('Low:Q',title='Price'),y2='High:Q',color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545')))
-            body=base.mark_bar(size=5).encode(y='Open:Q',y2='Close:Q',color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545')))
-            bands=base.transform_fold(ma_columns+['BB_Upper','BB_Lower'],as_=['Indicator','Value']).mark_line().encode(y='Value:Q',color='Indicator:N')
-            st.altair_chart((wick+body+bands).interactive(),use_container_width=True)
+            chart_df['Date']=pd.to_datetime(chart_df['Date'],errors='coerce')
+            try:
+                chart_df['Date']=chart_df['Date'].dt.tz_localize(None)
+            except TypeError:
+                pass
+            numeric_columns=['Open','High','Low','Close','Volume']+ma_columns+['BB_Upper','BB_Lower']
+            for column in numeric_columns:
+                if column in chart_df.columns:
+                    chart_df[column]=pd.to_numeric(chart_df[column],errors='coerce')
+            chart_df=chart_df.dropna(subset=['Date','Open','High','Low','Close']).sort_values('Date')
+            if chart_df.empty:
+                raise ValueError('No valid OHLC observations remain for the selected chart window.')
+            candle_color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545'))
+            if chart_frequency=='Intraday / day trading':
+                # Intraday charts need a readable time axis and a separate
+                # volume panel; combining everything in one plot compresses
+                # the candles and makes day-trading patterns hard to see.
+                time_axis=alt.Axis(format='%m/%d %H:%M',labelAngle=-45,tickCount=8)
+                x_encoding=alt.X('Date:T',title='Provider time',axis=time_axis)
+                intraday_base=alt.Chart(chart_df).encode(x=x_encoding)
+                visible_low=float(chart_df[['Low','Close']].min().min())
+                visible_high=float(chart_df[['High','Close']].max().max())
+                visible_range=max(visible_high-visible_low,0.01)
+                price_scale=alt.Scale(domain=[visible_low-visible_range*.03,visible_high+visible_range*.03])
+                wick=intraday_base.mark_rule(size=1).encode(
+                    y=alt.Y('Low:Q',title='Price',scale=price_scale),y2='High:Q',color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Open:Q',format='.2f'),alt.Tooltip('High:Q',format='.2f'),alt.Tooltip('Low:Q',format='.2f'),alt.Tooltip('Close:Q',format='.2f')])
+                body=intraday_base.mark_bar(size=8).encode(
+                    y=alt.Y('Open:Q',title='Price',scale=price_scale),y2='Close:Q',color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Close:Q',format='.2f'),alt.Tooltip('Volume:Q',format=',.0f')])
+                intraday_overlay_columns=[column for column in [f'MA{ma_fast}',f'MA{ma_medium}','BB_Upper','BB_Lower'] if column in chart_df.columns and chart_df[column].notna().sum()>=2]
+                if intraday_overlay_columns:
+                    overlays=intraday_base.transform_fold(intraday_overlay_columns,as_=['Indicator','Value']).mark_line(strokeWidth=1.5).encode(y=alt.Y('Value:Q',title='Price',scale=price_scale),color=alt.Color('Indicator:N',legend=alt.Legend(title='Overlay')))
+                close_line=intraday_base.mark_line(color='#10243e',strokeWidth=2).encode(y=alt.Y('Close:Q',title='Price',scale=price_scale),tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Close:Q',format='.2f')])
+                price_chart=(wick+body+close_line)
+                if intraday_overlay_columns:
+                    price_chart=price_chart+overlays
+                price_chart=price_chart.properties(height=350)
+                volume=alt.Chart(chart_df).mark_bar(size=8).encode(
+                    x=x_encoding,y=alt.Y('Volume:Q',title='Volume'),color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Volume:Q',format=',.0f')]).properties(height=95)
+                st.altair_chart((price_chart & volume).interactive(),use_container_width=True)
+            else:
+                base=alt.Chart(chart_df).encode(x=alt.X('Date:T',title='Date'))
+                wick=base.mark_rule().encode(y=alt.Y('Low:Q',title='Price'),y2='High:Q',color=candle_color)
+                body=base.mark_bar(size=5).encode(y='Open:Q',y2='Close:Q',color=candle_color)
+                bands=base.transform_fold(ma_columns+['BB_Upper','BB_Lower'],as_=['Indicator','Value']).mark_line().encode(y='Value:Q',color='Indicator:N')
+                daily_price_chart=(wick+body+bands).properties(height=390)
+                daily_volume=alt.Chart(chart_df).mark_bar().encode(
+                    x=alt.X('Date:T',title='Date'),
+                    y=alt.Y('Volume:Q',title='Volume'),
+                    color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Date'),alt.Tooltip('Volume:Q',format=',.0f')]
+                ).properties(height=120)
+                st.altair_chart((daily_price_chart & daily_volume).interactive(),use_container_width=True)
         except Exception:
             st.line_chart(technical_df[chart_columns].tail(chart_window))
+            if chart_frequency=='Intraday / day trading' and 'Volume' in technical_df.columns:
+                st.bar_chart(technical_df[['Volume']].tail(chart_window))
             st.caption('Candlestick rendering was unavailable in this environment; the fallback chart still shows price, moving averages, and Bollinger Bands.')
         latest_tech=technical_df.iloc[-1]
         q1,q2,q3=st.columns(3)
