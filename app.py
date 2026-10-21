@@ -1093,7 +1093,7 @@ else:
     except (ValueError,OverflowError,ZeroDivisionError) as exc: st.error(f'Report unavailable: {exc}')
 
 st.divider()
-st.header('SEC filings, earnings growth, analyst estimates & peers | V1.4')
+st.header('SEC filings, earnings growth, analyst estimates & peers | V1.5')
 st.caption('SEC XBRL facts are official reported data. Analyst metrics and peers are retrieved separately from unofficial Yahoo Finance data and may be missing or stale.')
 from sec_research import fetch_companyfacts,historical_table,eps_cagr,analyst_summary,peer_table
 sec_agent_default=secret_text('SEC_USER_AGENT')
