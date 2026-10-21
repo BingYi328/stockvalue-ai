@@ -824,13 +824,65 @@ with news_technical:
         chart_df=chart_df.rename(columns={chart_df.columns[0]:'Date'})
         try:
             import altair as alt
-            base=alt.Chart(chart_df).encode(x=alt.X('Date:T',title='Date'))
-            wick=base.mark_rule().encode(y=alt.Y('Low:Q',title='Price'),y2='High:Q',color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545')))
-            body=base.mark_bar(size=5).encode(y='Open:Q',y2='Close:Q',color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545')))
-            bands=base.transform_fold(ma_columns+['BB_Upper','BB_Lower'],as_=['Indicator','Value']).mark_line().encode(y='Value:Q',color='Indicator:N')
-            st.altair_chart((wick+body+bands).interactive(),use_container_width=True)
+            chart_df['Date']=pd.to_datetime(chart_df['Date'],errors='coerce')
+            try:
+                chart_df['Date']=chart_df['Date'].dt.tz_localize(None)
+            except TypeError:
+                pass
+            numeric_columns=['Open','High','Low','Close','Volume']+ma_columns+['BB_Upper','BB_Lower']
+            for column in numeric_columns:
+                if column in chart_df.columns:
+                    chart_df[column]=pd.to_numeric(chart_df[column],errors='coerce')
+            chart_df=chart_df.dropna(subset=['Date','Open','High','Low','Close']).sort_values('Date')
+            if chart_df.empty:
+                raise ValueError('No valid OHLC observations remain for the selected chart window.')
+            candle_color=alt.condition(alt.datum.Close>=alt.datum.Open,alt.value('#159957'),alt.value('#d64545'))
+            if chart_frequency=='Intraday / day trading':
+                # Intraday charts need a readable time axis and a separate
+                # volume panel; combining everything in one plot compresses
+                # the candles and makes day-trading patterns hard to see.
+                time_axis=alt.Axis(format='%m/%d %H:%M',labelAngle=-45,tickCount=8)
+                x_encoding=alt.X('Date:T',title='Provider time',axis=time_axis)
+                intraday_base=alt.Chart(chart_df).encode(x=x_encoding)
+                visible_low=float(chart_df[['Low','Close']].min().min())
+                visible_high=float(chart_df[['High','Close']].max().max())
+                visible_range=max(visible_high-visible_low,0.01)
+                price_scale=alt.Scale(domain=[visible_low-visible_range*.03,visible_high+visible_range*.03])
+                wick=intraday_base.mark_rule(size=1).encode(
+                    y=alt.Y('Low:Q',title='Price',scale=price_scale),y2='High:Q',color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Open:Q',format='.2f'),alt.Tooltip('High:Q',format='.2f'),alt.Tooltip('Low:Q',format='.2f'),alt.Tooltip('Close:Q',format='.2f')])
+                body=intraday_base.mark_bar(size=8).encode(
+                    y=alt.Y('Open:Q',title='Price',scale=price_scale),y2='Close:Q',color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Close:Q',format='.2f'),alt.Tooltip('Volume:Q',format=',.0f')])
+                intraday_overlay_columns=[column for column in [f'MA{ma_fast}',f'MA{ma_medium}','BB_Upper','BB_Lower'] if column in chart_df.columns and chart_df[column].notna().sum()>=2]
+                if intraday_overlay_columns:
+                    overlays=intraday_base.transform_fold(intraday_overlay_columns,as_=['Indicator','Value']).mark_line(strokeWidth=1.5).encode(y=alt.Y('Value:Q',title='Price',scale=price_scale),color=alt.Color('Indicator:N',legend=alt.Legend(title='Overlay')))
+                close_line=intraday_base.mark_line(color='#10243e',strokeWidth=2).encode(y=alt.Y('Close:Q',title='Price',scale=price_scale),tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Close:Q',format='.2f')])
+                price_chart=(wick+body+close_line)
+                if intraday_overlay_columns:
+                    price_chart=price_chart+overlays
+                price_chart=price_chart.properties(height=410)
+                volume=alt.Chart(chart_df).mark_bar(size=8).encode(
+                    x=x_encoding,y=alt.Y('Volume:Q',title='Volume'),color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Time'),alt.Tooltip('Volume:Q',format=',.0f')]).properties(height=125)
+                st.altair_chart((price_chart & volume).interactive(),use_container_width=True)
+            else:
+                base=alt.Chart(chart_df).encode(x=alt.X('Date:T',title='Date'))
+                wick=base.mark_rule().encode(y=alt.Y('Low:Q',title='Price'),y2='High:Q',color=candle_color)
+                body=base.mark_bar(size=5).encode(y='Open:Q',y2='Close:Q',color=candle_color)
+                bands=base.transform_fold(ma_columns+['BB_Upper','BB_Lower'],as_=['Indicator','Value']).mark_line().encode(y='Value:Q',color='Indicator:N')
+                daily_price_chart=(wick+body+bands).properties(height=390)
+                daily_volume=alt.Chart(chart_df).mark_bar().encode(
+                    x=alt.X('Date:T',title='Date'),
+                    y=alt.Y('Volume:Q',title='Volume'),
+                    color=candle_color,
+                    tooltip=[alt.Tooltip('Date:T',title='Date'),alt.Tooltip('Volume:Q',format=',.0f')]
+                ).properties(height=120)
+                st.altair_chart((daily_price_chart & daily_volume).interactive(),use_container_width=True)
         except Exception:
             st.line_chart(technical_df[chart_columns].tail(chart_window))
+            if chart_frequency=='Intraday / day trading' and 'Volume' in technical_df.columns:
+                st.bar_chart(technical_df[['Volume']].tail(chart_window))
             st.caption('Candlestick rendering was unavailable in this environment; the fallback chart still shows price, moving averages, and Bollinger Bands.')
         latest_tech=technical_df.iloc[-1]
         q1,q2,q3=st.columns(3)
@@ -1079,3 +1131,4 @@ with peer_tab:
                 st.metric('Illustrative peer-implied price (median P/E x trailing EPS)',f'{median_pe*eps:,.2f} {currency}')
                 st.caption('Not an intrinsic value. Multiple differences may reflect growth, leverage, risk, profitability, or accounting differences.')
         st.download_button('Download peer comparison CSV',peers_df.to_csv(index=False).encode(),file_name=f'{ticker}_peers.csv')
+
