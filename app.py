@@ -680,7 +680,11 @@ with valuation:
         st.caption('DDM requires a positive dividend and cost of equity above dividend growth.')
     st.markdown('### Valuation methods at a glance')
     summary_rows=[]
-    for method, value in [('FCFE', locals().get('fcfe_value') or locals().get('primary_result',{}).get('per_share')), ('Constant-growth EPS', locals().get('constant_growth_value')), ('DCF / FCFF', locals().get('intrinsic')), ('DDM', locals().get('ddm_value'))]:
+    _primary_result=locals().get('primary_result')
+    _primary_fcfe_value=locals().get('fcfe_value')
+    if not isinstance(_primary_fcfe_value,(int,float)) and isinstance(_primary_result,dict):
+        _primary_fcfe_value=_primary_result.get('per_share')
+    for method, value in [('FCFE',_primary_fcfe_value), ('Constant-growth EPS',locals().get('constant_growth_value')), ('DCF / FCFF',locals().get('intrinsic')), ('DDM',locals().get('ddm_value'))]:
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             summary_rows.append({'Method':method,'Estimated value / share':float(value),'Current price':price,'Upside / downside':float(value/price-1)})
     if summary_rows:
@@ -977,4 +981,3 @@ with peer_tab:
                 st.metric('Illustrative peer-implied price (median P/E x trailing EPS)',f'{median_pe*eps:,.2f} {currency}')
                 st.caption('Not an intrinsic value. Multiple differences may reflect growth, leverage, risk, profitability, or accounting differences.')
         st.download_button('Download peer comparison CSV',peers_df.to_csv(index=False).encode(),file_name=f'{ticker}_peers.csv')
-
