@@ -1,12 +1,20 @@
 import math
 import hashlib
+import json
+import os
+import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ImportError:
+    Fernet=None
+    InvalidToken=Exception
 from engine import dcf_per_share, gordon, risk_metrics, fcfe_per_share, fcfe_from_components
-from data import get_stock, extract_fcf, extract_fcfe_components, estimate_eps_growth, resolve_ticker, get_news_and_dates, technical_indicators
+from data import get_stock, extract_fcf, extract_fcfe_components, estimate_eps_growth, resolve_ticker, get_news_and_dates, get_transaction_activity, technical_indicators
 from advanced import three_stage_fcfe, implied_earnings_growth
 
 st.set_page_config(page_title='StockValue AI',page_icon='📈',layout='wide',initial_sidebar_state='expanded')
@@ -79,6 +87,7 @@ if logo_path.exists():
 st.markdown('''<div class="research-hero"><h1>StockValue AI</h1><p>Professional equity research dashboard for valuation, market context, and technical signals.</p><span class="hero-badge">Research prototype · FCFE first · Educational use</span></div>''',unsafe_allow_html=True)
 st.markdown(f'''<div class="visitor-counter-card"><div class="welcome">Welcome to StockValue AI!</div><div class="count">You are visitor #{st.session_state['visitor_number']:,}</div><div class="note">Total visitor sessions since the last app restart: {_visitor_count:,}.</div></div>''',unsafe_allow_html=True)
 st.caption('Public data via Yahoo Finance/yfinance is unofficial and may be delayed or incomplete. This dashboard is for educational research—not investment advice.')
+st.markdown('Feedback on StockValue AI is welcome: [send feedback to byi328@gmail.com](mailto:byi328@gmail.com)')
 
 # Main-page lookup remains available even when the sidebar is collapsed.
 with st.container():
@@ -100,7 +109,17 @@ def resolve_ticker_cached(query):
 
 @st.cache_data(ttl=900,show_spinner=False)
 def load_news_dates_cached(symbol):
-    return get_news_and_dates(symbol)
+    try:
+        return get_news_and_dates(symbol)
+    except Exception:
+        return pd.DataFrame(columns=['Headline','Publisher','Published','Link']),pd.DataFrame(columns=['Event','Date'])
+
+@st.cache_data(ttl=900,show_spinner=False)
+def load_transaction_activity_cached(symbol):
+    try:
+        return get_transaction_activity(symbol)
+    except Exception:
+        return pd.DataFrame(),pd.DataFrame()
 
 @st.cache_data(ttl=900,show_spinner=False)
 def load_peer_table_cached(peer_symbols):
@@ -118,6 +137,30 @@ def secret_text(name,default=''):
 
 STARTING_VIRTUAL_CASH=100000.0
 TERMS_VERSION='2026-10-20'
+SUBSCRIBER_STORE_PATH=Path(os.environ.get('SUBSCRIBER_STORE_PATH',Path(__file__).with_name('subscriber_records.json')))
+
+def _storage_key():
+    """Read the encryption key from deployment secrets, never from source code."""
+    try:
+        secret_key=st.secrets.get('SUBSCRIBER_STORE_KEY','')
+    except Exception:
+        secret_key=''
+    return str(os.environ.get('SUBSCRIBER_STORE_KEY') or secret_key or '').strip()
+
+def _decrypt_store():
+    if Fernet is None or not SUBSCRIBER_STORE_PATH.exists():
+        return None
+    key=_storage_key()
+    if not key:
+        return None
+    try:
+        raw=SUBSCRIBER_STORE_PATH.read_bytes()
+        if not raw.startswith(b'SVAI-ENCRYPTED-1\n'):
+            return None
+        decrypted=Fernet(key.encode('utf-8')).decrypt(raw.split(b'\n',1)[1])
+        return json.loads(decrypted.decode('utf-8'))
+    except (InvalidToken,ValueError,TypeError,json.JSONDecodeError,OSError):
+        return None
 FORUM_EXTREME_TERMS={
     'guaranteed winner','guaranteed win','cannot lose','can’t lose','no risk',
     'certainly double','will double','to the moon','all in','sell everything',
@@ -136,21 +179,65 @@ By creating an account, you acknowledge and agree that:
 4. **Paper trading only.** Any account balance and trading activity in this prototype are simulated. No real money, brokerage account, or payment processing is involved.
 5. **Forum conduct.** You may share ideas and information respectfully, but you may not post market manipulation, fraud, personal information, spam, unlawful content, or extremely bullish or extremely bearish claims such as guaranteed profits, guaranteed losses, or instructions to go all-in. The owner may remove posts or suspend access.
 6. **User responsibility and limitation of responsibility.** You are responsible for your decisions and use of the app. To the maximum extent permitted by applicable law, the owner and developer are not responsible for losses, damages, missed opportunities, or other consequences arising from reliance on the app, its estimates, its data, or forum content. This provision does not eliminate rights or responsibilities that cannot legally be excluded.
-7. **Prototype storage.** Accounts, balances, posts, and watchlists may be stored only in the active Streamlit session and may be lost when the app restarts. Do not submit passwords, account numbers, Social Security numbers, or other confidential information.
+7. **Privacy and prototype storage.** Passwords are stored as one-way password hashes rather than plain text, and forum posts use an anonymous subscriber alias. When encrypted storage is configured, accounts, balances, posts, and watchlists are written as authenticated encrypted data; otherwise they remain session-only. Do not submit your real name, email address, brokerage credentials, account numbers, Social Security numbers, or other confidential information.
 
 This prototype is not a brokerage, investment adviser, research service, or recommendation service. By checking the agreement box, you confirm that you have read and accepted these terms.
 '''
 
-def _password_hash(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+def _password_hash(password,salt=None):
+    salt=salt or secrets.token_hex(16)
+    digest=hashlib.pbkdf2_hmac('sha256',password.encode('utf-8'),salt.encode('utf-8'),310000).hex()
+    return f'pbkdf2_sha256$310000${salt}${digest}'
+
+def _verify_password(password,stored):
+    if isinstance(stored,str) and stored.startswith('pbkdf2_sha256$'):
+        try:
+            _,iterations,salt,digest=stored.split('$',3)
+            candidate=hashlib.pbkdf2_hmac('sha256',password.encode('utf-8'),salt.encode('utf-8'),int(iterations)).hex()
+            return secrets.compare_digest(candidate,digest)
+        except (ValueError,TypeError):
+            return False
+    # Support accounts created by the earlier prototype and upgrade them at login.
+    return isinstance(stored,str) and secrets.compare_digest(stored,hashlib.sha256(password.encode('utf-8')).hexdigest())
 
 def _init_accounts():
     if 'sim_accounts' not in st.session_state:
-        st.session_state['sim_accounts']={}
+        try:
+            saved=_decrypt_store()
+            if isinstance(saved,dict):
+                if isinstance(saved,dict) and 'accounts' in saved:
+                    st.session_state['sim_accounts']=saved.get('accounts',{}) if isinstance(saved.get('accounts',{}),dict) else {}
+                    st.session_state['forum_posts']=saved.get('forum_posts',[]) if isinstance(saved.get('forum_posts',[]),list) else []
+                else:
+                    st.session_state['sim_accounts']=saved if isinstance(saved,dict) else {}
+            else:
+                st.session_state['sim_accounts']={}
+        except Exception:
+            st.session_state['sim_accounts']={}
     if 'current_user' not in st.session_state:
         st.session_state['current_user']=None
     if 'forum_posts' not in st.session_state:
         st.session_state['forum_posts']=[]
+    # Do not expose historical login usernames in public forum posts.
+    for _post in st.session_state['forum_posts']:
+        if isinstance(_post,dict) and not str(_post.get('author','')).startswith('Subscriber-'):
+            _post['author']='Subscriber'
+
+def _save_subscriber_records():
+    """Persist subscriber records only as authenticated encrypted data."""
+    try:
+        if Fernet is None:
+            raise RuntimeError('cryptography is not installed')
+        key=_storage_key()
+        if not key:
+            raise RuntimeError('SUBSCRIBER_STORE_KEY is not configured')
+        SUBSCRIBER_STORE_PATH.parent.mkdir(parents=True,exist_ok=True)
+        payload={'accounts':st.session_state.get('sim_accounts',{}),'forum_posts':st.session_state.get('forum_posts',[]),'saved_at':datetime.now(timezone.utc).isoformat()}
+        encrypted=Fernet(key.encode('utf-8')).encrypt(json.dumps(payload).encode('utf-8'))
+        SUBSCRIBER_STORE_PATH.write_bytes(b'SVAI-ENCRYPTED-1\n'+encrypted)
+        st.session_state.pop('subscriber_store_error',None)
+    except Exception as exc:
+        st.session_state['subscriber_store_error']=str(exc)
 
 def _account():
     username=st.session_state.get('current_user')
@@ -166,8 +253,10 @@ def _create_account(username,password,terms_accepted=False):
         return False,'That simulated account already exists. Please log in.'
     st.session_state['sim_accounts'][username]={
         'password_hash':_password_hash(password),
+        'display_alias':f'Subscriber-{secrets.token_hex(4).upper()}',
         'cash':STARTING_VIRTUAL_CASH,
         'holdings':{},
+        'open_orders':[],
         'watchlist':{},
         'transactions':[],
         'terms_version':TERMS_VERSION,
@@ -175,6 +264,7 @@ def _create_account(username,password,terms_accepted=False):
         'created_at':datetime.now(timezone.utc).isoformat()
     }
     st.session_state['current_user']=username
+    _save_subscriber_records()
     return True,'Account created with $100,000 virtual cash.'
 
 def _validate_forum_post(title,body):
@@ -198,9 +288,63 @@ def _validate_forum_post(title,body):
 def _login(username,password):
     username=username.strip().lower()
     record=st.session_state['sim_accounts'].get(username)
-    if record and record['password_hash']==_password_hash(password):
+    if record and _verify_password(password,record.get('password_hash')):
+        if not str(record.get('password_hash','')).startswith('pbkdf2_sha256$'):
+            record['password_hash']=_password_hash(password)
+            _save_subscriber_records()
         st.session_state['current_user']=username
         return True
+
+def _execute_simulated_order(account,side,ticker,shares,execution_price,order_type):
+    """Execute a paper order at the simulated current price."""
+    shares=float(shares); execution_price=float(execution_price)
+    if side=='Buy':
+        cost=shares*execution_price
+        if cost>account['cash']:
+            return False,f'Order not executed: insufficient virtual cash for ${cost:,.2f}.'
+        position=account['holdings'].setdefault(ticker,{'shares':0.0,'avg_cost':0.0,'last_price':execution_price})
+        new_shares=position['shares']+shares
+        position['avg_cost']=(position['shares']*position['avg_cost']+cost)/new_shares
+        position['shares']=new_shares
+        position['last_price']=execution_price
+        account['cash']-=cost
+    else:
+        position=account['holdings'].get(ticker)
+        if position is None or shares>position['shares']:
+            return False,'Order not executed: insufficient virtual shares to sell.'
+        account['cash']+=shares*execution_price
+        position['shares']-=shares
+        position['last_price']=execution_price
+        if position['shares']<=1e-12:
+            del account['holdings'][ticker]
+    account['transactions'].append({'time':datetime.now(timezone.utc).isoformat(),'side':side.upper(),'ticker':ticker,'shares':shares,'price':execution_price,'order_type':order_type})
+    return True,f'{order_type} {side.lower()} order executed: {shares:g} share(s) of {ticker} at {execution_price:,.2f}.'
+
+def _order_triggered(order,current_price):
+    side=order['side']; order_type=order['order_type']; current_price=float(current_price)
+    if order_type=='Limit order':
+        return current_price<=order['limit_price'] if side=='Buy' else current_price>=order['limit_price']
+    if order_type=='Stop-loss order':
+        return current_price<=order['stop_price']
+    if order_type=='Stop-limit order':
+        return current_price<=order['stop_price'] and current_price>=order['limit_price']
+    return True
+
+def _process_open_orders(account,ticker,current_price):
+    messages=[]
+    remaining=[]
+    for order in account.setdefault('open_orders',[]):
+        if order['ticker']!=ticker or not _order_triggered(order,current_price):
+            remaining.append(order)
+            continue
+        ok,message=_execute_simulated_order(account,order['side'],ticker,order['shares'],current_price,order['order_type'])
+        messages.append(message)
+        if not ok:
+            remaining.append(order)
+    account['open_orders']=remaining
+    if messages:
+        _save_subscriber_records()
+    return messages
     return False
 
 _init_accounts()
@@ -211,6 +355,7 @@ with st.sidebar:
     st.caption('Enter a company name or ticker to begin a structured equity-research review.')
     st.markdown('### Free paper-trading prototype')
     st.caption('Create a simulated account to receive $100,000 in virtual cash. No real money is used.')
+    st.warning('Privacy: never enter your real name, email address, brokerage credentials, account numbers, Social Security number, or other confidential information in this prototype.')
     if st.session_state.get('current_user'):
         _user_record=_account()
         st.success(f"Signed in as **{st.session_state['current_user']}**")
@@ -234,6 +379,10 @@ with st.sidebar:
             if st.button('Log in',use_container_width=True):
                 if _login(_account_name,_account_password): st.rerun()
                 else: st.error('Invalid simulated username or password.')
+    if Fernet is not None and _storage_key():
+        st.caption('Subscriber records are written in encrypted form to the configured store.')
+    else:
+        st.warning('Encrypted subscriber storage is not configured. Records remain session-only and are not written to disk.')
     security_query=st.text_input('Company name or ticker','MSFT').strip()
     load=st.button('Analyze stock',type='primary',use_container_width=True)
     st.markdown('**Model settings**')
@@ -269,6 +418,12 @@ else:
 ticker=_stored_ticker
 search_query=st.session_state.get('search_query',ticker)
 active_account=_account()
+_order_messages=[]
+if active_account is not None:
+    active_account.setdefault('open_orders',[])
+    _order_messages=_process_open_orders(active_account,ticker,float(hist['Close'].iloc[-1]))
+for _order_message in _order_messages:
+    st.success(_order_message)
 if active_account is not None and not hist.empty:
     _latest=hist.iloc[-1]
     active_account['watchlist'][ticker]={
@@ -282,6 +437,7 @@ if active_account is not None and not hist.empty:
         'Warning above':active_account['watchlist'].get(ticker,{}).get('Warning above'),
         'Warning below':active_account['watchlist'].get(ticker,{}).get('Warning below')
     }
+    _save_subscriber_records()
 from funds import security_route,etf_analysis
 if security_route(info)=='ETF':
     st.subheader(f"ETF research: {info.get('longName') or ticker} ({ticker})")
@@ -307,6 +463,7 @@ st.markdown('<div class="section-kicker">Company overview</div>',unsafe_allow_ht
 st.subheader(f"{info.get('longName') or ticker} ({ticker})")
 if search_query.strip().upper()!=ticker:
     st.caption(f'Search input: {search_query} | Resolved ticker: {ticker}')
+st.markdown(f'''<div class="portfolio-balance-card"><div class="label">Current market price</div><div class="amount">{price:,.2f} {currency}</div><div class="detail">Latest available adjusted close · {hist.index[-1].date()} · {"ETF" if security_route(info)=="ETF" else "Stock"}</div></div>''',unsafe_allow_html=True)
 st.caption(f'Latest available adjusted price: {hist.index[-1].date()} | Currency: {currency} | Source: Yahoo Finance (unofficial)')
 if currency!='USD': st.warning('Non-USD listing: all financial statement units and quote currencies must be checked for consistency before interpreting the DCF.')
 
@@ -331,6 +488,7 @@ c3.metric('Trailing P/E',f"{info['trailingPE']:.1f}" if isinstance(info.get('tra
 c4.metric('Dividend yield',f"{info['dividendYield']*100:.2f}%" if isinstance(info.get('dividendYield'),(float,int)) else 'N/A')
 st.markdown('<div class="source-note">Market snapshot · Latest available quote and company summary fields</div>',unsafe_allow_html=True)
 news_df,dates_df=load_news_dates_cached(ticker)
+insider_df,institutional_df=load_transaction_activity_cached(ticker)
 technical_df,technical_signals=technical_indicators(hist)
 valuation,news_technical,risk,fundamentals,portfolio,forum,notes=st.tabs(['Intrinsic valuation','News & technical analysis','Risk & return','Financial fundamentals','Paper portfolio','Subscriber forum','Methods & caveats'])
 with valuation:
@@ -534,14 +692,27 @@ with valuation:
 with news_technical:
     st.markdown('### Major news and key dates')
     if not news_df.empty:
-        st.dataframe(news_df,hide_index=True,use_container_width=True)
+        st.dataframe(news_df,hide_index=True,use_container_width=True,column_config={'Link':st.column_config.LinkColumn('Source article',display_text='Open article')})
     else:
         st.info('No recent news was returned by the public data provider.')
     if not dates_df.empty:
         st.markdown('#### Upcoming and reported dates')
-        st.dataframe(dates_df,hide_index=True,use_container_width=True)
+        st.dataframe(dates_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
     else:
         st.info('No earnings or corporate-event dates were returned by the public data provider.')
+    st.markdown('### Insider and institutional activity')
+    st.caption('The tables below separate reported insider records from institutional holding disclosures. A reported institutional holding is not proof of a purchase or sale, and an implied value/share is not necessarily the actual transaction price.')
+    if not insider_df.empty:
+        st.markdown('#### Insider transactions')
+        st.dataframe(insider_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
+    else:
+        st.info('No provider-reported insider transactions were returned.')
+    if not institutional_df.empty:
+        st.markdown('#### Institutional holdings reported')
+        st.dataframe(institutional_df,hide_index=True,use_container_width=True,column_config={'Source':st.column_config.LinkColumn('Source',display_text='Yahoo Finance')})
+    else:
+        st.info('No provider-reported institutional holdings were returned.')
+    st.warning('Truthfulness and timing check: these records come from a public provider and may be delayed, incomplete, restated, or mapped incorrectly. Before making a decision, open the source link and verify insider transactions against SEC Form 4 and institutional holdings against the institution\'s SEC filing (such as Form 13F).')
     st.caption('News, event dates, and prices come from public Yahoo Finance data and may be delayed, incomplete, or unavailable.')
 
     st.markdown('### Technical analysis')
@@ -623,37 +794,53 @@ with portfolio:
         else:
             st.info('No paper positions yet. Analyze a stock or ETF, then place a simulated order below.')
         st.markdown('#### Simulated order')
-        order_side=st.radio('Order type',['Buy','Sell'],horizontal=True,key='paper_order_side')
+        with st.expander('Order types explained',expanded=False):
+            st.markdown('''
+            - **Market order:** executes immediately at the latest simulated price. The exact execution price may differ from the displayed quote in real markets.
+            - **Limit order:** executes only at your limit price or a more favorable price. A buy limit executes at or below the limit; a sell limit executes at or above it. Unfilled orders remain open.
+            - **Stop-loss order:** a simulated sell order that activates when the price reaches or falls below your stop price. It is designed to limit losses but cannot guarantee an execution price in a real market.
+            - **Stop-limit order:** activates at the stop price and then requires the current simulated price to meet your limit price. It offers price control but may remain unfilled.
+
+            These are educational paper-trading simulations. They do not model intraday prices, market gaps, order-book depth, commissions, taxes, or slippage.
+            ''')
+        order_side=st.radio('Side',['Buy','Sell'],horizontal=True,key='paper_order_side')
+        order_type=st.selectbox('Order type',['Market order','Limit order','Stop-loss order','Stop-limit order'],key='paper_order_type')
         order_shares=st.number_input(f'{order_side} shares of {ticker}',min_value=0.0,value=0.0,step=1.0,key='paper_order_shares')
-        if st.button(f'{order_side} {ticker}',type='primary',key='paper_order_button'):
+        limit_price=None; stop_price=None
+        if order_type=='Limit order':
+            limit_price=st.number_input('Limit price',min_value=0.01,value=float(price),step=0.01,key='paper_limit_price')
+        elif order_type=='Stop-loss order':
+            if order_side!='Sell':
+                st.info('A stop-loss order is a sell order. Choose Sell, or use a market/limit order to buy.')
+            stop_price=st.number_input('Stop price',min_value=0.01,value=float(price),step=0.01,key='paper_stop_price')
+        elif order_type=='Stop-limit order':
+            if order_side!='Sell':
+                st.info('This prototype supports stop-limit orders as sell orders. Choose Sell.')
+            stop_price=st.number_input('Stop price',min_value=0.01,value=float(price),step=0.01,key='paper_stop_limit_stop')
+            limit_price=st.number_input('Limit price after stop triggers',min_value=0.01,value=float(price),step=0.01,key='paper_stop_limit_price')
+        if st.button(f'Place {order_type} · {order_side} {ticker}',type='primary',key='paper_order_button'):
             if order_shares<=0:
                 st.error('Enter a number of shares greater than zero.')
-            elif order_side=='Buy':
-                cost=order_shares*price
-                if cost>active_account['cash']:
-                    st.error(f'Insufficient virtual cash. This order requires ${cost:,.2f}.')
-                else:
-                    position=active_account['holdings'].setdefault(ticker,{'shares':0.0,'avg_cost':0.0,'last_price':price})
-                    new_shares=position['shares']+order_shares
-                    position['avg_cost']=(position['shares']*position['avg_cost']+cost)/new_shares
-                    position['shares']=new_shares
-                    position['last_price']=price
-                    active_account['cash']-=cost
-                    active_account['transactions'].append({'time':datetime.now(timezone.utc).isoformat(),'side':'BUY','ticker':ticker,'shares':order_shares,'price':price})
-                    st.success(f'Bought {order_shares:g} share(s) of {ticker} at {price:,.2f}.')
-                    st.rerun()
+            elif order_type in ('Stop-loss order','Stop-limit order') and order_side!='Sell':
+                st.error(f'{order_type} is available as a sell order in this prototype.')
             else:
-                position=active_account['holdings'].get(ticker)
-                if position is None or order_shares>position['shares']:
-                    st.error('You do not have enough virtual shares to sell.')
+                order={'ticker':ticker,'side':order_side,'shares':float(order_shares),'order_type':order_type,'created_at':datetime.now(timezone.utc).isoformat()}
+                if limit_price is not None: order['limit_price']=float(limit_price)
+                if stop_price is not None: order['stop_price']=float(stop_price)
+                if order_type=='Market order' or _order_triggered(order,price):
+                    _ok,_message=_execute_simulated_order(active_account,order_side,ticker,order_shares,price,order_type)
+                    if _ok:
+                        _save_subscriber_records(); st.success(_message); st.rerun()
+                    else:
+                        st.error(_message)
                 else:
-                    active_account['cash']+=order_shares*price
-                    position['shares']-=order_shares
-                    position['last_price']=price
-                    active_account['transactions'].append({'time':datetime.now(timezone.utc).isoformat(),'side':'SELL','ticker':ticker,'shares':order_shares,'price':price})
-                    if position['shares']<=1e-12: del active_account['holdings'][ticker]
-                    st.success(f'Sold {order_shares:g} share(s) of {ticker} at {price:,.2f}.')
+                    active_account.setdefault('open_orders',[]).append(order)
+                    _save_subscriber_records()
+                    st.success(f'{order_type} accepted and kept open. It will be checked when a new simulated price is retrieved for {ticker}.')
                     st.rerun()
+        if active_account.get('open_orders'):
+            st.markdown('#### Open simulated orders')
+            st.dataframe(pd.DataFrame(active_account['open_orders']),hide_index=True,use_container_width=True)
         st.markdown('#### Automatic watchlist')
         watch_rows=list(active_account['watchlist'].values())
         if watch_rows:
@@ -667,6 +854,7 @@ with portfolio:
             if st.button(f'Save {ticker} price warnings',key=f'save_warnings_{ticker}'):
                 current_watch['Warning above']=warn_above if warn_above>0 else None
                 current_watch['Warning below']=warn_below if warn_below>0 else None
+                _save_subscriber_records()
                 st.success('Price warnings saved for this simulated account.')
             if current_watch.get('Warning above') and current_watch['Close']>=current_watch['Warning above']:
                 st.warning(f"{ticker} is at or above your warning price of ${current_watch['Warning above']:,.2f}.")
@@ -699,9 +887,10 @@ with forum:
                     'title':forum_title.strip(),
                     'type':forum_type,
                     'body':forum_body.strip(),
-                    'author':st.session_state['current_user'],
+                    'author':active_account.get('display_alias','Subscriber'),
                     'created_at':datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
                 })
+                _save_subscriber_records()
                 st.success('Your balanced discussion post was published.')
             else:
                 st.error(_forum_message)
