@@ -2,202 +2,6 @@ import math
 import pandas as pd
 
 
-def resolve_ticker(query):
-    """Resolve a ticker or company name to a Yahoo Finance symbol."""
-    import yfinance as yf
-    query=str(query or '').strip()
-    if not query:
-        raise ValueError('Enter a company name or ticker symbol.')
-    candidate=query.upper()
-    valid_candidate=len(candidate)<=16 and all(c.isalnum() or c in '.-^' for c in candidate)
-    try:
-        search=yf.Search(query, max_results=8)
-        quotes=getattr(search,'quotes',[]) or []
-        for quote in quotes:
-            symbol=str(quote.get('symbol') or '').upper()
-            if symbol==candidate and quote.get('quoteType') in {'EQUITY','ETF'}:
-                return symbol
-        for quote in quotes:
-            symbol=quote.get('symbol')
-            if symbol and quote.get('quoteType') in {'EQUITY','ETF'}:
-                return str(symbol).upper()
-    except Exception:
-        pass
-    if valid_candidate:
-        return candidate
-    raise ValueError(f'Could not resolve "{query}" to a stock or ETF ticker.')
-
-
-def get_news_and_dates(ticker):
-    """Retrieve recent Yahoo Finance news and available event dates."""
-    import yfinance as yf
-    obj=yf.Ticker(ticker)
-    calendar_source=f'https://finance.yahoo.com/quote/{ticker}/calendar/'
-    news=[]
-    try:
-        for item in (obj.news or [])[:12]:
-            content=item.get('content',item) if isinstance(item,dict) else {}
-            title=content.get('title') or item.get('title')
-            provider=(content.get('provider') or {}).get('displayName') if isinstance(content.get('provider'),dict) else content.get('publisher') or item.get('publisher')
-            link=content.get('clickThroughUrl') or content.get('canonicalUrl') or {}
-            if isinstance(link,dict): link=link.get('url')
-            timestamp=content.get('pubDate') or item.get('providerPublishTime')
-            if isinstance(timestamp,(int,float)):
-                timestamp=pd.to_datetime(timestamp,unit='s',utc=True)
-            else:
-                timestamp=pd.to_datetime(timestamp,utc=True,errors='coerce')
-            if title:
-                news.append({'Headline':title,'Publisher':provider or 'Yahoo Finance','Published':timestamp,'Link':link or ''})
-    except Exception:
-        news=[]
-    news_df=pd.DataFrame(news)
-    if not news_df.empty:
-        news_df=news_df.sort_values('Published',ascending=False,na_position='last').reset_index(drop=True)
-        news_df['Published']=news_df['Published'].map(lambda x:x.strftime('%Y-%m-%d %H:%M UTC') if pd.notna(x) else 'Date unavailable')
-    dates=[]
-    try:
-        calendar=obj.calendar
-        if isinstance(calendar,pd.DataFrame):
-            for key,value in calendar.items():
-                values=value.dropna().tolist() if hasattr(value,'dropna') else [value]
-                dates.append({'Event':str(key),'Date':', '.join(str(x) for x in values),'Source':calendar_source})
-        elif isinstance(calendar,dict):
-            for key,value in calendar.items():
-                values=value if isinstance(value,(list,tuple,pd.Series)) else [value]
-                dates.append({'Event':str(key),'Date':', '.join(str(x) for x in values),'Source':calendar_source})
-    except Exception:
-        pass
-    try:
-        earnings_dates=obj.get_earnings_dates(limit=8)
-        if earnings_dates is not None and not earnings_dates.empty:
-            for date in earnings_dates.index[:8]:
-                dates.append({'Event':'Earnings date','Date':str(pd.Timestamp(date)),'Source':calendar_source})
-    except Exception:
-        pass
-    dates_df=pd.DataFrame(dates).drop_duplicates() if dates else pd.DataFrame(columns=['Event','Date','Source'])
-    return news_df,dates_df
-
-
-def get_transaction_activity(ticker):
-    """Retrieve provider-reported insider activity and institutional holdings.
-
-    Insider rows may include reported shares and value; unit price is calculated
-    only when both are available. Institutional-holder rows are holdings
-    disclosures, not confirmed trade tickets, so they are never labeled as
-    exact purchases or sales.
-    """
-    import yfinance as yf
-    ticker=str(ticker).strip().upper()
-    obj=yf.Ticker(ticker)
-    insider_columns=['Date','Insider','Transaction','Shares','Reported value','Reported price/share','Source','Verification']
-    institution_columns=['Date reported','Institution','Shares reported','Reported value','Reported value/share','Source','Verification']
-    insider_rows=[]
-    institutional_rows=[]
-    insider_source=f'https://finance.yahoo.com/quote/{ticker}/insider-transactions/'
-    institutional_source=f'https://finance.yahoo.com/quote/{ticker}/holders/'
-
-    try:
-        insider=getattr(obj,'insider_transactions',None)
-        if insider is not None and not insider.empty:
-            for index,row in insider.reset_index().iterrows():
-                date=row.get('Start Date',row.get('StartDate',row.get('Date',index)))
-                shares=pd.to_numeric(row.get('Shares'),errors='coerce')
-                value=pd.to_numeric(row.get('Value'),errors='coerce')
-                price=value/shares if pd.notna(value) and pd.notna(shares) and shares!=0 else float('nan')
-                insider_rows.append({
-                    'Date':str(pd.to_datetime(date,errors='coerce').date()) if pd.notna(pd.to_datetime(date,errors='coerce')) else 'Date unavailable',
-                    'Insider':row.get('Filer Name',row.get('FilerName','Not reported')),
-                    'Transaction':row.get('Transaction',row.get('Text','Not reported')),
-                    'Shares':float(shares) if pd.notna(shares) else None,
-                    'Reported value':float(value) if pd.notna(value) else None,
-                    'Reported price/share':float(price) if pd.notna(price) else None,
-                    'Source':insider_source,
-                    'Verification':'Provider-reported insider record; verify the corresponding SEC Form 4 before relying on it.'
-                })
-    except Exception:
-        pass
-
-    try:
-        holders=getattr(obj,'institutional_holders',None)
-        if holders is not None and not holders.empty:
-            for index,row in holders.reset_index().iterrows():
-                date=row.get('Date Reported',row.get('DateReported',row.get('Date',index)))
-                shares=pd.to_numeric(row.get('Shares'),errors='coerce')
-                value=pd.to_numeric(row.get('Value'),errors='coerce')
-                implied=value/shares if pd.notna(value) and pd.notna(shares) and shares!=0 else float('nan')
-                institutional_rows.append({
-                    'Date reported':str(pd.to_datetime(date,errors='coerce').date()) if pd.notna(pd.to_datetime(date,errors='coerce')) else 'Date unavailable',
-                    'Institution':row.get('Holder',row.get('Institution','Not reported')),
-                    'Shares reported':float(shares) if pd.notna(shares) else None,
-                    'Reported value':float(value) if pd.notna(value) else None,
-                    'Reported value/share':float(implied) if pd.notna(implied) else None,
-                    'Source':institutional_source,
-                    'Verification':'Reported institutional holding snapshot; this is not an exact transaction price or trade record. Verify the institution\'s SEC filing.'
-                })
-    except Exception:
-        pass
-
-    insider_df=pd.DataFrame(insider_rows,columns=insider_columns)
-    institutional_df=pd.DataFrame(institutional_rows,columns=institution_columns)
-    return insider_df,institutional_df
-
-
-def technical_indicators(history):
-    """Calculate OHLCV technical indicators and current signal warnings."""
-    frame=history.copy()
-    if frame.empty or not {'Open','High','Low','Close'}.issubset(frame.columns):
-        return pd.DataFrame(),[]
-    frame=frame[['Open','High','Low','Close','Volume']].dropna().copy()
-    frame['MA20']=frame['Close'].rolling(20).mean()
-    frame['MA50']=frame['Close'].rolling(50).mean()
-    frame['MA200']=frame['Close'].rolling(200).mean()
-    frame['BB_Middle']=frame['MA20']
-    frame['BB_STD']=frame['Close'].rolling(20).std()
-    frame['BB_Upper']=frame['BB_Middle']+2*frame['BB_STD']
-    frame['BB_Lower']=frame['BB_Middle']-2*frame['BB_STD']
-    delta=frame['Close'].diff()
-    gains=delta.clip(lower=0).rolling(14).mean()
-    losses=(-delta.clip(upper=0)).rolling(14).mean()
-    rs=gains/losses.replace(0,float('nan'))
-    frame['RSI14']=100-(100/(1+rs))
-    ema12=frame['Close'].ewm(span=12,adjust=False).mean()
-    ema26=frame['Close'].ewm(span=26,adjust=False).mean()
-    frame['MACD']=ema12-ema26
-    frame['MACD_Signal']=frame['MACD'].ewm(span=9,adjust=False).mean()
-    frame['MACD_Hist']=frame['MACD']-frame['MACD_Signal']
-    signals=[]
-    recent=frame.dropna(subset=['MA50','MA200']).tail(2)
-    if len(recent)==2:
-        prev,curr=recent.iloc[0],recent.iloc[1]
-        if prev['MA50']<=prev['MA200'] and curr['MA50']>curr['MA200']:
-            signals.append(('warning','Golden cross: the 50-day moving average crossed above the 200-day moving average.'))
-        elif prev['MA50']>=prev['MA200'] and curr['MA50']<curr['MA200']:
-            signals.append(('warning','Dead cross: the 50-day moving average crossed below the 200-day moving average.'))
-    latest=frame.iloc[-1]
-    if pd.notna(latest['BB_Upper']) and latest['Close']>latest['BB_Upper']:
-        signals.append(('warning','Price broke above the upper Bollinger Band; momentum is strong but the move may be extended.'))
-    elif pd.notna(latest['BB_Lower']) and latest['Close']<latest['BB_Lower']:
-        signals.append(('warning','Price broke below the lower Bollinger Band; downside momentum is strong but the move may be extended.'))
-    if pd.notna(latest['RSI14']):
-        if latest['RSI14']>=70: signals.append(('warning',f"RSI is overbought at {latest['RSI14']:.1f}."))
-        elif latest['RSI14']<=30: signals.append(('warning',f"RSI is oversold at {latest['RSI14']:.1f}."))
-    macd_recent=frame.dropna(subset=['MACD','MACD_Signal']).tail(2)
-    if len(macd_recent)==2:
-        prev,curr=macd_recent.iloc[0],macd_recent.iloc[1]
-        if prev['MACD']<=prev['MACD_Signal'] and curr['MACD']>curr['MACD_Signal']:
-            signals.append(('info','MACD bullish crossover.'))
-        elif prev['MACD']>=prev['MACD_Signal'] and curr['MACD']<curr['MACD_Signal']:
-            signals.append(('warning','MACD bearish crossover.'))
-    if len(frame)>=3:
-        a,b,c=frame.iloc[-3],frame.iloc[-2],frame.iloc[-1]
-        body=max(abs(b['Close']-b['Open']),1e-12)
-        morning=(a['Close']<a['Open'] and abs(b['Close']-b['Open'])<=abs(a['Close']-a['Open'])*0.45 and c['Close']>c['Open'] and c['Close']>(a['Open']+a['Close'])/2)
-        evening=(a['Close']>a['Open'] and abs(b['Close']-b['Open'])<=abs(a['Close']-a['Open'])*0.45 and c['Close']<c['Open'] and c['Close']<(a['Open']+a['Close'])/2)
-        if morning: signals.append(('info','Possible morning star reversal pattern detected.'))
-        if evening: signals.append(('warning','Possible evening star reversal pattern detected.'))
-    return frame,signals
-
-
 def get_stock(ticker):
     import yfinance as yf
     ticker=ticker.strip().upper()
@@ -212,7 +16,6 @@ def get_stock(ticker):
     cashflow=obj.cashflow
     balance=obj.balance_sheet
     income=getattr(obj,'income_stmt',pd.DataFrame())
-    info=enrich_info_from_statements(info,income,cashflow,balance)
     return info, history, market, cashflow, balance, income
 
 
@@ -223,26 +26,6 @@ def find_latest(frame, labels):
             values=pd.to_numeric(frame.loc[label],errors='coerce').dropna()
             if len(values): return float(values.iloc[0])
     return None
-
-def _fill_missing(info,key,frame,labels):
-    """Fill a missing Yahoo summary field from an annual statement when possible."""
-    current=info.get(key)
-    if current is None or not isinstance(current,(int,float)) or not math.isfinite(float(current)):
-        value=find_latest(frame,labels)
-        if value is not None:
-            info[key]=value
-
-def enrich_info_from_statements(info,income,cashflow,balance):
-    """Use annual statements as a transparent fallback for incomplete summary data."""
-    info=dict(info or {})
-    _fill_missing(info,'sharesOutstanding',balance,['Ordinary Shares Number','Share Issued','Common Stock Equity'])
-    _fill_missing(info,'totalDebt',balance,['Total Debt','Long Term Debt','Long Term Debt And Capital Lease Obligation','Current Debt'])
-    _fill_missing(info,'totalCash',balance,['Cash Cash Equivalents And Short Term Investments','Cash And Cash Equivalents','Cash Financial'])
-    _fill_missing(info,'totalRevenue',income,['Total Revenue','Operating Revenue','Revenue'])
-    _fill_missing(info,'netIncomeToCommon',income,['Net Income','Net Income Common Stockholders','Net Income Including Noncontrolling Interests'])
-    _fill_missing(info,'operatingCashflow',cashflow,['Operating Cash Flow','Cash Flow From Continuing Operating Activities'])
-    _fill_missing(info,'freeCashflow',cashflow,['Free Cash Flow'])
-    return info
 
 
 def extract_fcf(info, cashflow):
@@ -279,11 +62,7 @@ def _cagr_from_series(values, periods):
         try:
             value=float(value)
             if math.isfinite(value) and value>0:
-                if isinstance(period,(int,float)) and not isinstance(period,bool):
-                    period_date=pd.Timestamp(year=int(period),month=12,day=31)
-                else:
-                    period_date=pd.Timestamp(period)
-                valid.append((period_date,value))
+                valid.append((pd.Timestamp(period),value))
         except (TypeError,ValueError):
             continue
     valid=sorted(valid,key=lambda x:x[0])
@@ -313,3 +92,4 @@ def estimate_eps_growth(income_stmt=None, sec_table=None):
                 if result:
                     return (*result,f'Yahoo Finance annual {label}')
     return None
+
